@@ -12,13 +12,36 @@
 #include <chrono>
 #include <csignal>
 #include <atomic>
+#include <cuda_runtime.h>
+
+// ── CUDA error checking ────────────────────────────────────────────
+#define CUDA_CHECK(call)                                                      \
+    do {                                                                      \
+        cudaError_t err_ = (call);                                            \
+        if (err_ != cudaSuccess) {                                            \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__      \
+                      << " — " << cudaGetErrorString(err_) << "\n";           \
+            std::exit(1);                                                     \
+        }                                                                     \
+    } while (0)
+
+/// Check for errors from the last kernel launch.
+#define CUDA_CHECK_LAST()                                                     \
+    do {                                                                      \
+        cudaError_t err_ = cudaGetLastError();                                \
+        if (err_ != cudaSuccess) {                                            \
+            std::cerr << "CUDA kernel error at " << __FILE__ << ":" << __LINE__ \
+                      << " — " << cudaGetErrorString(err_) << "\n";           \
+            std::exit(1);                                                     \
+        }                                                                     \
+    } while (0)
 
 // ── Config defaults ───────────────────────────────────────────────
 static constexpr uint64_t kDefaultStart           = 1;
 static constexpr uint64_t kDefaultEnd             = 0;        // 0 means "run forever"
 static constexpr uint32_t kDefaultBatchSize       = 1u << 20;  // ~1 million
 static constexpr uint32_t kDefaultMinChainLength   = 1'000;
-static constexpr uint32_t kDefaultMaxSteps         = 1'000'000;        // 0 = unlimited
+static constexpr uint32_t kDefaultMaxSteps         = 1'000'000;
 static constexpr const char* kDefaultOutput        = "collatz.csv";
 static constexpr const char* kDefaultDivergent     = "collatz_divergent.csv";
 static constexpr const char* kDefaultCheckpoint    = "collatz.ckpt";
@@ -42,18 +65,41 @@ struct Config {
     std::string checkpoint = kDefaultCheckpoint;
     bool        resume     = false;
     bool        fresh      = false;
+    bool        oddOnly    = true;  // skip even numbers by default
     bool        help       = false;
 };
+
+// ── Device query ───────────────────────────────────────────────────
+static void PrintDeviceInfo() {
+    int deviceCount = 0;
+    CUDA_CHECK(cudaGetDeviceCount(&deviceCount));
+    if (deviceCount == 0) {
+        std::cerr << "ERROR: no CUDA-capable devices found\n";
+        std::exit(1);
+    }
+
+    int device = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+
+    cudaDeviceProp props{};
+    CUDA_CHECK(cudaGetDeviceProperties(&props, device));
+
+    std::cerr << "GPU: " << props.name
+              << " (SM " << props.major << "." << props.minor << ", "
+              << props.multiProcessorCount << " SMs, "
+              << (props.totalGlobalMem >> 20) << " MiB)\n";
+}
 
 // ── Checkpoint ─────────────────────────────────────────────────────
 // Format: plain text, one field per line:
 //   nextStart_limb0 nextStart_limb1 ... nextStart_limbN
-//   batchSize
+//   batchSize longestChain
 // Written atomically via tmp + rename.
 
 static bool WriteCheckpoint(const std::string& Path,
                              const BigUint<>& NextStart,
-                             uint32_t BatchSize) {
+                             uint32_t BatchSize,
+                             uint32_t LongestChain) {
     std::string tmp = Path + ".tmp";
     std::ofstream out(tmp);
     if (!out) {
@@ -64,7 +110,7 @@ static bool WriteCheckpoint(const std::string& Path,
         if (i) out << ' ';
         out << NextStart.limbs[i];
     }
-    out << '\n' << BatchSize << '\n';
+    out << '\n' << BatchSize << ' ' << LongestChain << '\n';
     out.close();
     if (std::rename(tmp.c_str(), Path.c_str()) != 0) {
         std::cerr << "WARNING: rename failed for checkpoint\n";
@@ -75,13 +121,16 @@ static bool WriteCheckpoint(const std::string& Path,
 
 static bool ReadCheckpoint(const std::string& Path,
                             BigUint<>& NextStart,
-                            uint32_t& BatchSize) {
+                            uint32_t& BatchSize,
+                            uint32_t& LongestChain) {
     std::ifstream in(Path);
     if (!in) return false;
     for (int i = 0; i < COLLATZ_N_LIMBS; ++i) {
         if (!(in >> NextStart.limbs[i])) return false;
     }
     if (!(in >> BatchSize)) return false;
+    // LongestChain is optional (backwards compat with old checkpoints)
+    if (!(in >> LongestChain)) LongestChain = 0;
     return true;
 }
 
@@ -96,12 +145,13 @@ static void PrintUsage(const char* Prog) {
         << "  --end N             Last number to test (0 = infinite)\n"
         << "  --batch-size N      Numbers per GPU batch (default " << kDefaultBatchSize << ")\n"
         << "  --min-chain N       Minimum chain length to log (default " << kDefaultMinChainLength << ")\n"
-        << "  --max-steps N       Max steps before flagging as non-converging (default " << kDefaultMaxSteps << " = off)\n"
+        << "  --max-steps N       Max steps before flagging as non-converging (default " << kDefaultMaxSteps << ")\n"
         << "  --output FILE       CSV output file (default " << kDefaultOutput << ")\n"
         << "  --divergent FILE    File for non-converging chains (default " << kDefaultDivergent << ")\n"
         << "  --checkpoint FILE   Checkpoint file (default " << kDefaultCheckpoint << ")\n"
         << "  --resume            Resume from checkpoint\n"
         << "  --fresh             Discard existing checkpoint and start fresh\n"
+        << "  --no-odd-only       Test all numbers (default: skip even numbers)\n"
         << "  --help              Show this help\n"
         << "\n"
         << "Integers can exceed 2^64. Uses " << (COLLATZ_N_LIMBS * 64)
@@ -134,8 +184,7 @@ static BigUint<> ParseHex(const char* S) {
     BigUint<> result;
     for (const char* p = S; *p; ++p) {
         // result <<= 4
-        result.ShiftLeft1(); result.ShiftLeft1();
-        result.ShiftLeft1(); result.ShiftLeft1();
+        result.ShiftLeftN(4);
         uint64_t nib;
         if (*p >= '0' && *p <= '9')      nib = *p - '0';
         else if (*p >= 'a' && *p <= 'f') nib = *p - 'a' + 10;
@@ -163,15 +212,20 @@ static BigUint<> ParseBigUint(const char* S) {
             std::cerr << "ERROR: only 2^N power notation is supported\n";
             std::exit(1);
         }
-        unsigned long exp = std::strtoul(caret + 1, nullptr, 10);
+        char* endp = nullptr;
+        unsigned long exp = std::strtoul(caret + 1, &endp, 10);
+        if (endp == caret + 1 || *endp != '\0') {
+            std::cerr << "ERROR: invalid exponent in 2^N notation\n";
+            std::exit(1);
+        }
         if (exp >= static_cast<unsigned long>(COLLATZ_N_LIMBS) * 64) {
             std::cerr << "ERROR: 2^" << exp << " exceeds "
                       << COLLATZ_N_LIMBS * 64 << "-bit capacity\n";
             std::exit(1);
         }
-        BigUint<> result(1);
-        for (unsigned long i = 0; i < exp; ++i)
-            result.ShiftLeft1();
+        // O(1) construction via SetBit
+        BigUint<> result;
+        result.SetBit(static_cast<int>(exp));
         return result;
     }
     // 0x hex prefix
@@ -179,6 +233,21 @@ static BigUint<> ParseBigUint(const char* S) {
         return ParseHex(S + 2);
     // Plain decimal
     return ParseDecimal(S);
+}
+
+/// Parse a uint32_t from string with validation.
+static uint32_t ParseUint32(const char* S, const char* FlagName) {
+    char* endp = nullptr;
+    unsigned long val = std::strtoul(S, &endp, 10);
+    if (endp == S || *endp != '\0') {
+        std::cerr << "ERROR: invalid number for " << FlagName << ": " << S << "\n";
+        std::exit(1);
+    }
+    if (val > UINT32_MAX) {
+        std::cerr << "ERROR: value too large for " << FlagName << ": " << S << "\n";
+        std::exit(1);
+    }
+    return static_cast<uint32_t>(val);
 }
 
 static Config ParseArgs(int Argc, char** Argv) {
@@ -195,20 +264,36 @@ static Config ParseArgs(int Argc, char** Argv) {
 
         if (arg("--start"))          cfg.start      = ParseBigUint(next());
         else if (arg("--end"))       cfg.endVal    = ParseBigUint(next());
-        else if (arg("--batch-size"))cfg.batchSize  = static_cast<uint32_t>(std::atol(next()));
-        else if (arg("--min-chain")) cfg.minChain   = static_cast<uint32_t>(std::atol(next()));
-        else if (arg("--max-steps")) cfg.maxSteps   = static_cast<uint32_t>(std::atol(next()));
+        else if (arg("--batch-size"))cfg.batchSize  = ParseUint32(next(), "--batch-size");
+        else if (arg("--min-chain")) cfg.minChain   = ParseUint32(next(), "--min-chain");
+        else if (arg("--max-steps")) cfg.maxSteps   = ParseUint32(next(), "--max-steps");
         else if (arg("--output"))    cfg.output      = next();
         else if (arg("--divergent")) cfg.divergent   = next();
         else if (arg("--checkpoint"))cfg.checkpoint  = next();
         else if (arg("--resume"))    cfg.resume      = true;
         else if (arg("--fresh"))     cfg.fresh       = true;
+        else if (arg("--no-odd-only")) cfg.oddOnly   = false;
         else if (arg("--help"))      cfg.help        = true;
         else {
             std::cerr << "ERROR: unknown option " << Argv[i] << "\n";
             std::exit(1);
         }
     }
+
+    // ── Validation ──
+    if (cfg.resume && cfg.fresh) {
+        std::cerr << "ERROR: --resume and --fresh are mutually exclusive\n";
+        std::exit(1);
+    }
+    if (cfg.batchSize == 0) {
+        std::cerr << "ERROR: --batch-size must be > 0\n";
+        std::exit(1);
+    }
+    if (cfg.start.IsZero()) {
+        std::cerr << "ERROR: --start must be >= 1\n";
+        std::exit(1);
+    }
+
     return cfg;
 }
 
@@ -253,6 +338,9 @@ int main(int argc, char** argv) {
     std::signal(SIGINT,  SignalHandler);
     std::signal(SIGTERM, SignalHandler);
 
+    // Print GPU info
+    PrintDeviceInfo();
+
     // Safety check: refuse to start if a checkpoint exists but --resume not given
     if (!cfg.resume) {
         std::ifstream ckptTest(cfg.checkpoint);
@@ -273,25 +361,34 @@ int main(int argc, char** argv) {
     }
 
     // Resume from checkpoint if requested
+    uint32_t longestChain = 0;
     if (cfg.resume) {
         BigUint<> ckptStart;
         uint32_t ckptBatch;
-        if (ReadCheckpoint(cfg.checkpoint, ckptStart, ckptBatch)) {
+        uint32_t ckptLongest = 0;
+        if (ReadCheckpoint(cfg.checkpoint, ckptStart, ckptBatch, ckptLongest)) {
             cfg.start = ckptStart;
+            longestChain = ckptLongest;
             std::cerr << "Resumed from checkpoint: start = "
-                      << ckptStart.ToPowerString() << "\n";
+                      << ckptStart.ToPowerString()
+                      << ", longest = " << ckptLongest << "\n";
         } else {
             std::cerr << "WARNING: no checkpoint found, starting from --start\n";
         }
     }
 
-    // Scan existing CSV for longest chain if resuming
-    uint32_t longestChain = 0;
-    if (cfg.resume) {
+    // If checkpoint didn't have longest chain (old format), scan CSV
+    if (cfg.resume && longestChain == 0) {
         longestChain = ScanLongestChain(cfg.output);
         if (longestChain > 0) {
             std::cerr << "Longest chain in existing CSV: " << longestChain << "\n";
         }
+    }
+
+    // Ensure start is odd when using odd-only mode
+    if (cfg.oddOnly && cfg.start.IsEven() && !cfg.start.IsZero()) {
+        cfg.start.AddU64(1);
+        std::cerr << "Adjusted start to odd number: " << cfg.start.ToPowerString() << "\n";
     }
 
     // Open CSV for appending
@@ -327,16 +424,16 @@ int main(int argc, char** argv) {
     const size_t resultBytes = batchSize * sizeof(CollatzResult<>);
 
     cudaStream_t streams[2];
-    cudaStreamCreate(&streams[0]);
-    cudaStreamCreate(&streams[1]);
+    CUDA_CHECK(cudaStreamCreate(&streams[0]));
+    CUDA_CHECK(cudaStreamCreate(&streams[1]));
 
     CollatzResult<>* dResults[2];
-    cudaMalloc(&dResults[0], resultBytes);
-    cudaMalloc(&dResults[1], resultBytes);
+    CUDA_CHECK(cudaMalloc(&dResults[0], resultBytes));
+    CUDA_CHECK(cudaMalloc(&dResults[1], resultBytes));
 
     CollatzResult<>* hResults[2];
-    cudaMallocHost(&hResults[0], resultBytes);  // pinned memory for async copy
-    cudaMallocHost(&hResults[1], resultBytes);
+    CUDA_CHECK(cudaMallocHost(&hResults[0], resultBytes));  // pinned for async copy
+    CUDA_CHECK(cudaMallocHost(&hResults[1], resultBytes));
 
     BigUint<> current = cfg.start;
     bool hasEnd = !cfg.endVal.IsZero();
@@ -345,28 +442,28 @@ int main(int argc, char** argv) {
     auto wallStart = std::chrono::steady_clock::now();
     auto lastReport = wallStart;
 
+    // In odd-only mode, each thread covers 2 numbers, so the stride per batch
+    // is batchSize * 2 in the number space but we process batchSize results.
+    const uint32_t stride = cfg.oddOnly ? 2 : 1;
+
     // Determine the actual count for this batch (may be less at the end)
     auto ComputeBatchCount = [&](const BigUint<>& BatchStart) -> uint32_t {
         if (!hasEnd) return batchSize;
-        // How many numbers from BatchStart to endVal (inclusive)?
         if (cfg.endVal < BatchStart) return 0;
-        // If the whole batch fits before endVal, return full batchSize.
-        // Otherwise, linear-scan the tail (small, only at the very end).
         BigUint<> limit = BatchStart;
-        limit.AddU64(batchSize);
+        limit.AddU64(static_cast<uint64_t>(batchSize) * stride);
         if (limit < cfg.endVal || limit == cfg.endVal) {
             return batchSize;
         }
-        // Linear scan for remaining count (small, only when near end)
         BigUint<> probe = BatchStart;
         for (uint32_t c = 0; c < batchSize; ++c) {
             if (cfg.endVal < probe) return c;
-            probe.AddU64(1);
+            probe.AddU64(stride);
         }
         return batchSize;
     };
 
-    int buf = 0;          // current buffer index (0 or 1)
+    int buf = 0;
 
     // Launch first batch
     uint32_t count = ComputeBatchCount(current);
@@ -374,32 +471,30 @@ int main(int argc, char** argv) {
         std::cerr << "Nothing to compute (start > end).\n";
         goto cleanup;
     }
-    LaunchCollatzKernel<>(current, count, dResults[buf], cfg.maxSteps, streams[buf]);
+    LaunchCollatzKernel<>(current, count, dResults[buf], cfg.maxSteps, streams[buf], cfg.oddOnly);
+    CUDA_CHECK_LAST();
 
     while (!gShutdownRequested.load(std::memory_order_relaxed)) {
-        // Advance to next batch
         BigUint<> prevStart = current;
         uint32_t prevCount = count;
         int prevBuf = buf;
 
-        current.AddU64(count);
+        current.AddU64(static_cast<uint64_t>(count) * stride);
         buf ^= 1;
 
         count = ComputeBatchCount(current);
         bool moreWork = (count > 0);
 
-        // Launch next batch (overlaps with D→H of previous)
         if (moreWork) {
-            LaunchCollatzKernel<>(current, count, dResults[buf], cfg.maxSteps, streams[buf]);
+            LaunchCollatzKernel<>(current, count, dResults[buf], cfg.maxSteps, streams[buf], cfg.oddOnly);
+            CUDA_CHECK_LAST();
         }
 
-        // Copy previous batch results D→H asynchronously, then sync
-        cudaMemcpyAsync(hResults[prevBuf], dResults[prevBuf],
+        CUDA_CHECK(cudaMemcpyAsync(hResults[prevBuf], dResults[prevBuf],
                         prevCount * sizeof(CollatzResult<>),
-                        cudaMemcpyDeviceToHost, streams[prevBuf]);
-        cudaStreamSynchronize(streams[prevBuf]);
+                        cudaMemcpyDeviceToHost, streams[prevBuf]));
+        CUDA_CHECK(cudaStreamSynchronize(streams[prevBuf]));
 
-        // Process results
         for (uint32_t i = 0; i < prevCount; ++i) {
             const auto& r = hResults[prevBuf][i];
             if (r.overflow) {
@@ -409,7 +504,6 @@ int main(int argc, char** argv) {
                 continue;
             }
             if (r.exceededLimit) {
-                // Chain did not converge within maxSteps
                 divCsv << r.start.ToHexString() << ','
                         << r.chainLength << ','
                         << r.lastValue.ToHexString() << ','
@@ -430,7 +524,6 @@ int main(int argc, char** argv) {
 
         totalProcessed += prevCount;
 
-        // Progress report every ~5 seconds
         auto now = std::chrono::steady_clock::now();
         double elapsedSinceReport =
             std::chrono::duration<double>(now - lastReport).count();
@@ -444,38 +537,36 @@ int main(int argc, char** argv) {
                    << "s  " << std::setprecision(0) << rate << " n/s  "
                    << "longest: " << longestChain << "  "
                    << "current: " << current.ToPowerString();
-            // Pad with spaces to clear any previous longer line
+            if (cfg.oddOnly) status << " (odd only)";
             std::string line = status.str();
             if (line.size() < 80) line.resize(80, ' ');
             std::cerr << line << std::flush;
             lastReport = now;
         }
 
-        // Checkpoint
         WriteCheckpoint(cfg.checkpoint, moreWork ? current : prevStart,
-                         batchSize);
+                         batchSize, longestChain);
 
         if (!moreWork) break;
     }
 
-    // If we were interrupted, sync any in-flight work and checkpoint
     if (gShutdownRequested.load(std::memory_order_relaxed)) {
         std::cerr << "\nShutting down gracefully...\n";
-        cudaStreamSynchronize(streams[0]);
-        cudaStreamSynchronize(streams[1]);
-        WriteCheckpoint(cfg.checkpoint, current, batchSize);
+        CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+        CUDA_CHECK(cudaStreamSynchronize(streams[1]));
+        WriteCheckpoint(cfg.checkpoint, current, batchSize, longestChain);
         std::cerr << "Checkpoint written at " << current.ToPowerString() << "\n";
     }
 
 cleanup:
     csv.close();
     if (divCsv.is_open()) divCsv.close();
-    cudaFreeHost(hResults[0]);
-    cudaFreeHost(hResults[1]);
-    cudaFree(dResults[0]);
-    cudaFree(dResults[1]);
-    cudaStreamDestroy(streams[0]);
-    cudaStreamDestroy(streams[1]);
+    CUDA_CHECK(cudaFreeHost(hResults[0]));
+    CUDA_CHECK(cudaFreeHost(hResults[1]));
+    CUDA_CHECK(cudaFree(dResults[0]));
+    CUDA_CHECK(cudaFree(dResults[1]));
+    CUDA_CHECK(cudaStreamDestroy(streams[0]));
+    CUDA_CHECK(cudaStreamDestroy(streams[1]));
 
     double totalElapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - wallStart).count();

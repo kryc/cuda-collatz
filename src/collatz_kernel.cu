@@ -1,9 +1,10 @@
 #include "collatz/collatz_kernel.cuh"
 
 static constexpr int kBlockSize = 256;
+static constexpr int kMinBlocksPerSM = 2;
 
-template <int N_LIMBS>
-__global__ void __launch_bounds__(kBlockSize) CollatzKernel(
+template <int N_LIMBS, bool OddOnly>
+__global__ void __launch_bounds__(kBlockSize, kMinBlocksPerSM) CollatzKernel(
     BigUint<N_LIMBS> Start,
     uint32_t Count,
     CollatzResult<N_LIMBS>* __restrict__ Results,
@@ -13,7 +14,12 @@ __global__ void __launch_bounds__(kBlockSize) CollatzKernel(
     if (idx >= Count) return;
 
     BigUint<N_LIMBS> n = Start;
-    n.AddU64(static_cast<uint64_t>(idx));
+    if constexpr (OddOnly) {
+        // Start + 2*idx: process only odd numbers
+        n.AddU64(static_cast<uint64_t>(idx) * 2);
+    } else {
+        n.AddU64(static_cast<uint64_t>(idx));
+    }
 
     CollatzResult<N_LIMBS> res;
     res.start = n;
@@ -60,15 +66,21 @@ void LaunchCollatzKernel(
     uint32_t Count,
     CollatzResult<N_LIMBS>* DResults,
     uint32_t MaxSteps,
-    cudaStream_t Stream)
+    cudaStream_t Stream,
+    bool OddOnly)
 {
     if (Count == 0) return;
     const int gridSize = (Count + kBlockSize - 1) / kBlockSize;
-    CollatzKernel<N_LIMBS><<<gridSize, kBlockSize, 0, Stream>>>(
-        Start, Count, DResults, MaxSteps);
+    if (OddOnly) {
+        CollatzKernel<N_LIMBS, true><<<gridSize, kBlockSize, 0, Stream>>>(
+            Start, Count, DResults, MaxSteps);
+    } else {
+        CollatzKernel<N_LIMBS, false><<<gridSize, kBlockSize, 0, Stream>>>(
+            Start, Count, DResults, MaxSteps);
+    }
 }
 
 // Explicit instantiations for common limb counts
-template void LaunchCollatzKernel<1>(const BigUint<1>&, uint32_t, CollatzResult<1>*, uint32_t, cudaStream_t);
-template void LaunchCollatzKernel<2>(const BigUint<2>&, uint32_t, CollatzResult<2>*, uint32_t, cudaStream_t);
-template void LaunchCollatzKernel<4>(const BigUint<4>&, uint32_t, CollatzResult<4>*, uint32_t, cudaStream_t);
+template void LaunchCollatzKernel<1>(const BigUint<1>&, uint32_t, CollatzResult<1>*, uint32_t, cudaStream_t, bool);
+template void LaunchCollatzKernel<2>(const BigUint<2>&, uint32_t, CollatzResult<2>*, uint32_t, cudaStream_t, bool);
+template void LaunchCollatzKernel<4>(const BigUint<4>&, uint32_t, CollatzResult<4>*, uint32_t, cudaStream_t, bool);

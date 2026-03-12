@@ -20,10 +20,12 @@ struct CollatzResult {
 /// @param DResults    Device pointer to an array of at least `Count` CollatzResult.
 /// @param MaxSteps    Maximum steps before giving up (0 = unlimited).
 /// @param Stream      CUDA stream (0 for default).
+/// @param OddOnly     If true, process only odd numbers: Start + 2*idx.
 template <int N_LIMBS = COLLATZ_N_LIMBS>
 void LaunchCollatzKernel(
     const BigUint<N_LIMBS>& Start,
     uint32_t Count,
     CollatzResult<N_LIMBS>* DResults,
     uint32_t MaxSteps = 0,
-    cudaStream_t Stream = 0);
+    cudaStream_t Stream = 0,
+    bool OddOnly = false);

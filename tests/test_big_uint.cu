@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "collatz/big_uint.cuh"
+#include <sstream>
 
 // ═══════════════════════════════════════════════════════════════════
 // Construction
@@ -562,4 +563,262 @@ TEST(BigUintToPowerString, HighBitWithLargeRemainder) {
     BigUint<2> a(0);
     a.limbs[1] = 3;  // bits 64 and 65 set
     EXPECT_EQ(a.ToPowerString(), "2^65 + 0x10000000000000000");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ShiftLeftN (multi-bit left shift)
+// ═══════════════════════════════════════════════════════════════════
+
+TEST(BigUintShift, LeftShiftN_Zero) {
+    BigUint<2> a(42);
+    a.ShiftLeftN(0);
+    EXPECT_EQ(a, BigUint<2>(42));
+}
+
+TEST(BigUintShift, LeftShiftN_ByOne) {
+    BigUint<2> a(1);
+    a.ShiftLeftN(1);
+    EXPECT_EQ(a, BigUint<2>(2));
+}
+
+TEST(BigUintShift, LeftShiftN_ByFour) {
+    BigUint<2> a(3);
+    a.ShiftLeftN(4);
+    EXPECT_EQ(a, BigUint<2>(48));
+}
+
+TEST(BigUintShift, LeftShiftN_CrossLimb) {
+    BigUint<2> a(0x8000000000000000ULL);
+    a.ShiftLeftN(1);
+    EXPECT_EQ(a.limbs[0], 0u);
+    EXPECT_EQ(a.limbs[1], 1u);
+}
+
+TEST(BigUintShift, LeftShiftN_FullLimb) {
+    BigUint<2> a(0xFF);
+    a.ShiftLeftN(64);
+    EXPECT_EQ(a.limbs[0], 0u);
+    EXPECT_EQ(a.limbs[1], 0xFFu);
+}
+
+TEST(BigUintShift, LeftShiftN_LimbPlusBits) {
+    BigUint<2> a(8);  // 0x8
+    a.ShiftLeftN(68);  // shift left by 64+4
+    EXPECT_EQ(a.limbs[0], 0u);
+    EXPECT_EQ(a.limbs[1], 0x80u);  // 8 << 4 = 0x80
+}
+
+TEST(BigUintShift, LeftShiftN_AllBits) {
+    BigUint<2> a(1);
+    a.ShiftLeftN(128);
+    EXPECT_EQ(a.limbs[0], 0u);
+    EXPECT_EQ(a.limbs[1], 0u);
+}
+
+TEST(BigUintShift, LeftShiftN_ExceedsBits) {
+    BigUint<2> a(0xFF);
+    a.ShiftLeftN(200);  // way beyond 128 bits
+    EXPECT_EQ(a.limbs[0], 0u);
+    EXPECT_EQ(a.limbs[1], 0u);
+}
+
+TEST(BigUintShift, LeftShiftN_RoundTrip) {
+    // Shift left N, then shift right N → should recover original
+    BigUint<2> original(0xDEADBEEFCAFEull);
+    BigUint<2> a = original;
+    a.ShiftLeftN(20);
+    a.ShiftRightN(20);
+    EXPECT_EQ(a, original);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SetBit
+// ═══════════════════════════════════════════════════════════════════
+
+TEST(BigUintSetBit, Bit0) {
+    BigUint<2> a;
+    a.SetBit(0);
+    EXPECT_EQ(a, BigUint<2>(1));
+}
+
+TEST(BigUintSetBit, Bit1) {
+    BigUint<2> a;
+    a.SetBit(1);
+    EXPECT_EQ(a, BigUint<2>(2));
+}
+
+TEST(BigUintSetBit, Bit63) {
+    BigUint<2> a;
+    a.SetBit(63);
+    EXPECT_EQ(a.limbs[0], 1ULL << 63);
+    EXPECT_EQ(a.limbs[1], 0u);
+}
+
+TEST(BigUintSetBit, Bit64) {
+    BigUint<2> a;
+    a.SetBit(64);
+    EXPECT_EQ(a.limbs[0], 0u);
+    EXPECT_EQ(a.limbs[1], 1u);
+}
+
+TEST(BigUintSetBit, Bit127) {
+    BigUint<2> a;
+    a.SetBit(127);
+    EXPECT_EQ(a.limbs[0], 0u);
+    EXPECT_EQ(a.limbs[1], 1ULL << 63);
+}
+
+TEST(BigUintSetBit, MultipleBits) {
+    BigUint<2> a;
+    a.SetBit(0);
+    a.SetBit(3);
+    a.SetBit(7);
+    EXPECT_EQ(a, BigUint<2>(1 + 8 + 128));  // 137
+}
+
+TEST(BigUintSetBit, IdempotentOnAlreadySet) {
+    BigUint<2> a(1);
+    a.SetBit(0);
+    EXPECT_EQ(a, BigUint<2>(1));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// operator<< (stream insertion)
+// ═══════════════════════════════════════════════════════════════════
+
+TEST(BigUintStreamOperator, Zero) {
+    BigUint<2> a(0);
+    std::ostringstream ss;
+    ss << a;
+    EXPECT_EQ(ss.str(), "0x0");
+}
+
+TEST(BigUintStreamOperator, SmallValue) {
+    BigUint<2> a(255);
+    std::ostringstream ss;
+    ss << a;
+    EXPECT_EQ(ss.str(), "0xff");
+}
+
+TEST(BigUintStreamOperator, LargeValue) {
+    BigUint<2> a(0);
+    a.limbs[1] = 1;  // 2^64
+    std::ostringstream ss;
+    ss << a;
+    EXPECT_EQ(ss.str(), "0x10000000000000000");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ToUint64 edge cases
+// ═══════════════════════════════════════════════════════════════════
+
+TEST(BigUintToUint64, Zero) {
+    EXPECT_EQ(BigUint<2>(0).ToUint64(), 0u);
+}
+
+TEST(BigUintToUint64, MaxUint64) {
+    EXPECT_EQ(BigUint<2>(UINT64_MAX).ToUint64(), UINT64_MAX);
+}
+
+TEST(BigUintToUint64, HighLimbIgnored) {
+    BigUint<2> a(42);
+    a.limbs[1] = 999;
+    EXPECT_EQ(a.ToUint64(), 42u);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// AddU64 overflow across multiple limbs
+// ═══════════════════════════════════════════════════════════════════
+
+TEST(BigUintAdd, AddU64_CarryChain) {
+    // limbs[0] = MAX, limbs[1] = MAX → adding 1 overflows everything
+    BigUint<2> a(UINT64_MAX);
+    a.limbs[1] = UINT64_MAX;
+    uint64_t overflow = a.AddU64(1);
+    EXPECT_EQ(a.limbs[0], 0u);
+    EXPECT_EQ(a.limbs[1], 0u);
+    EXPECT_EQ(overflow, 1u);
+}
+
+TEST(BigUintAdd, AddU64_LargeValue) {
+    BigUint<2> a(0);
+    a.AddU64(UINT64_MAX);
+    EXPECT_EQ(a, BigUint<2>(UINT64_MAX));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Copy semantics
+// ═══════════════════════════════════════════════════════════════════
+
+TEST(BigUintCopy, CopyConstruction) {
+    BigUint<2> a(42);
+    a.limbs[1] = 7;
+    BigUint<2> b = a;
+    EXPECT_EQ(b.limbs[0], 42u);
+    EXPECT_EQ(b.limbs[1], 7u);
+    // Mutating original doesn't affect copy
+    a.limbs[0] = 0;
+    EXPECT_EQ(b.limbs[0], 42u);
+}
+
+TEST(BigUintCopy, CopyAssignment) {
+    BigUint<2> a(99);
+    BigUint<2> b(0);
+    b = a;
+    EXPECT_EQ(b, BigUint<2>(99));
+    a.limbs[0] = 1;
+    EXPECT_EQ(b, BigUint<2>(99));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// BigUint<4> (256-bit) — basic operations
+// ═══════════════════════════════════════════════════════════════════
+
+TEST(BigUint4, Construction) {
+    BigUint<4> a(42);
+    EXPECT_EQ(a.limbs[0], 42u);
+    for (int i = 1; i < 4; ++i) EXPECT_EQ(a.limbs[i], 0u);
+}
+
+TEST(BigUint4, AddCarryChain) {
+    BigUint<4> a(UINT64_MAX);
+    a.AddU64(1);
+    EXPECT_EQ(a.limbs[0], 0u);
+    EXPECT_EQ(a.limbs[1], 1u);
+    EXPECT_EQ(a.limbs[2], 0u);
+    EXPECT_EQ(a.limbs[3], 0u);
+}
+
+TEST(BigUint4, ShiftLeftN_CrossMultipleLimbs) {
+    BigUint<4> a(1);
+    a.ShiftLeftN(128);  // shift into limbs[2]
+    EXPECT_EQ(a.limbs[0], 0u);
+    EXPECT_EQ(a.limbs[1], 0u);
+    EXPECT_EQ(a.limbs[2], 1u);
+    EXPECT_EQ(a.limbs[3], 0u);
+}
+
+TEST(BigUint4, SetBit_HighLimb) {
+    BigUint<4> a;
+    a.SetBit(192);  // bit in limbs[3]
+    EXPECT_EQ(a.limbs[0], 0u);
+    EXPECT_EQ(a.limbs[1], 0u);
+    EXPECT_EQ(a.limbs[2], 0u);
+    EXPECT_EQ(a.limbs[3], 1u);
+}
+
+TEST(BigUint4, TriplePlusOne_NoOverflow) {
+    BigUint<4> a(UINT64_MAX);  // large but 256-bit gives plenty of room
+    bool overflow = a.TriplePlusOne();
+    EXPECT_FALSE(overflow);
+    // 3 * (2^64-1) + 1 = 3*2^64 - 2 → limbs[0] = -2 mod 2^64, limbs[1] = 2
+    EXPECT_EQ(a.limbs[0], UINT64_MAX * 3 + 1);
+    EXPECT_EQ(a.limbs[1], 2u);
+}
+
+TEST(BigUint4, Comparison) {
+    BigUint<4> a(0), b(0);
+    a.limbs[3] = 1;
+    b.limbs[2] = UINT64_MAX;
+    EXPECT_GT(a, b);
 }

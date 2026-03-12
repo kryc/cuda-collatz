@@ -4,6 +4,7 @@
 #include <cstring>
 #include <string>
 #include <algorithm>
+#include <ostream>
 
 #ifdef __CUDACC__
 #define BU_HOST_DEVICE __host__ __device__ __forceinline__
@@ -186,6 +187,33 @@ struct BigUint {
         return carry;
     }
 
+    /// Left-shift by N bits (multiply by 2^N). Bits shifted out are lost.
+    BU_HOST_DEVICE void ShiftLeftN(int N) {
+        int limbShift = N / 64;
+        int bitShift  = N % 64;
+        #pragma unroll
+        for (int i = N_LIMBS - 1; i >= 0; --i) {
+            int src = i - limbShift;
+            if (src >= 0) {
+                limbs[i] = limbs[src] << bitShift;
+                if (bitShift > 0 && src - 1 >= 0) {
+                    limbs[i] |= limbs[src - 1] >> (64 - bitShift);
+                }
+            } else {
+                limbs[i] = 0;
+            }
+        }
+    }
+
+    /// Set a single bit at position Pos (0 = LSB).
+    BU_HOST_DEVICE void SetBit(int Pos) {
+        int limb = Pos / 64;
+        int bit  = Pos % 64;
+        if (limb < N_LIMBS) {
+            limbs[limb] |= (1ULL << bit);
+        }
+    }
+
     /// Compute 3*n + 1 in-place. Returns true if overflow occurred
     /// (result doesn't fit in N_LIMBS limbs).
     BU_HOST_DEVICE bool TriplePlusOne() {
@@ -306,5 +334,10 @@ struct BigUint {
             return base + std::to_string(remainder.limbs[0]);
         }
         return base + remainder.ToHexString();
+    }
+
+    /// Stream insertion operator (host-only, uses ToHexString).
+    friend std::ostream& operator<<(std::ostream& Os, const BigUint& V) {
+        return Os << V.ToHexString();
     }
 };

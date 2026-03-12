@@ -274,3 +274,102 @@ TEST(CollatzKernel, MaxSteps_LastValue_Preserved) {
     // lastValue should not be 1 since we stopped early
     EXPECT_FALSE(r.lastValue.IsOne());
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Edge cases
+// ═══════════════════════════════════════════════════════════════════
+
+TEST(CollatzKernel, Start_GreaterThan2Pow64) {
+    // Start at 2^64 + 1 (odd) with 2-limb BigUint — should not overflow
+    BigUint<2> start(1);
+    start.limbs[1] = 1;  // 2^64 + 1
+
+    CollatzResult<2>* dResults = nullptr;
+    CUDA_CHECK(cudaMalloc(&dResults, sizeof(CollatzResult<2>)));
+    LaunchCollatzKernel<2>(start, 1, dResults);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CollatzResult<2> result;
+    CUDA_CHECK(cudaMemcpy(&result, dResults, sizeof(CollatzResult<2>),
+                           cudaMemcpyDeviceToHost));
+    cudaFree(dResults);
+
+    EXPECT_FALSE(result.overflow);
+    EXPECT_GT(result.chainLength, 0u);
+    EXPECT_EQ(result.start, start);
+}
+
+TEST(CollatzKernel, MultiBlock_LargeBatch) {
+    // Launch a batch large enough to span multiple thread blocks
+    // kBlockSize is 256, so 1024 values = 4 blocks
+    const uint32_t count = 1024;
+    auto results = RunBatch<2>(1, count);
+    ASSERT_EQ(results.size(), count);
+
+    // Spot-check first and last few
+    EXPECT_EQ(results[0].chainLength, 0u);   // n=1
+    EXPECT_EQ(results[1].chainLength, 1u);   // n=2
+    EXPECT_EQ(results[26].chainLength, 111u); // n=27
+    EXPECT_FALSE(results[count - 1].overflow);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Odd-only mode
+// ═══════════════════════════════════════════════════════════════════
+
+/// Helper: run kernel in OddOnly mode.
+template <int N_LIMBS>
+std::vector<CollatzResult<N_LIMBS>> RunBatchOddOnly(uint64_t StartVal, uint32_t Count) {
+    BigUint<N_LIMBS> start(StartVal);
+    CollatzResult<N_LIMBS>* dResults = nullptr;
+    size_t bytes = Count * sizeof(CollatzResult<N_LIMBS>);
+    EXPECT_EQ(cudaMalloc(&dResults, bytes), cudaSuccess);
+
+    // OddOnly = true
+    LaunchCollatzKernel<N_LIMBS>(start, Count, dResults, 0, 0, true);
+
+    cudaError_t syncErr = cudaDeviceSynchronize();
+    EXPECT_EQ(syncErr, cudaSuccess) << cudaGetErrorString(syncErr);
+
+    std::vector<CollatzResult<N_LIMBS>> results(Count);
+    EXPECT_EQ(cudaMemcpy(results.data(), dResults, bytes,
+                          cudaMemcpyDeviceToHost), cudaSuccess);
+    cudaFree(dResults);
+    return results;
+}
+
+TEST(CollatzKernel, OddOnly_FirstThreeOdds) {
+    // Start=1, Count=3, OddOnly → tests n=1, n=3, n=5
+    auto results = RunBatchOddOnly<2>(1, 3);
+    ASSERT_EQ(results.size(), 3u);
+
+    // n=1: chain=0
+    EXPECT_EQ(results[0].start, BigUint<2>(1));
+    EXPECT_EQ(results[0].chainLength, 0u);
+
+    // n=3: chain=7
+    EXPECT_EQ(results[1].start, BigUint<2>(3));
+    EXPECT_EQ(results[1].chainLength, 7u);
+
+    // n=5: chain=5
+    EXPECT_EQ(results[2].start, BigUint<2>(5));
+    EXPECT_EQ(results[2].chainLength, 5u);
+}
+
+TEST(CollatzKernel, OddOnly_N27) {
+    // Start=1, Count=14, OddOnly → 14th odd = 1,3,5,7,9,11,13,15,17,19,21,23,25,27
+    // Result index 13 should be n=27 with chain=111
+    auto results = RunBatchOddOnly<2>(1, 14);
+    ASSERT_EQ(results.size(), 14u);
+    EXPECT_EQ(results[13].start, BigUint<2>(27));
+    EXPECT_EQ(results[13].chainLength, 111u);
+}
+
+TEST(CollatzKernel, OddOnly_AllStartsAreOdd) {
+    auto results = RunBatchOddOnly<2>(1, 50);
+    for (uint32_t i = 0; i < 50; ++i) {
+        EXPECT_TRUE(results[i].start.IsOdd())
+            << "Result " << i << " start is even: "
+            << results[i].start.ToHexString();
+    }
+}

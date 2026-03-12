@@ -15,7 +15,9 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # nvcc 12.4 supports up to sm_90. Use PTX (compute_90) for forward
 # compatibility with newer architectures (e.g. sm_120 Blackwell).
 # The driver will JIT-compile the PTX at load time.
-set(CMAKE_CUDA_ARCHITECTURES 90)
+# Override with: cmake -B build -DCUDA_ARCH=80
+set(CUDA_ARCH "90" CACHE STRING "CUDA architecture (e.g. 80, 86, 89, 90)")
+set(CMAKE_CUDA_ARCHITECTURES ${CUDA_ARCH})
 
 # Allow nvcc to use relaxed constexpr (needed for some GTest headers)
 add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
@@ -31,11 +33,15 @@ FetchContent_MakeAvailable(googletest)
 
 enable_testing()
 
+# ── Big integer limb count (default 2 = 128-bit) ──
+set(COLLATZ_N_LIMBS "2" CACHE STRING "Number of 64-bit limbs for BigUint (2=128-bit, 4=256-bit, etc.)")
+
 # ── Production library ──
 add_library(collatz_lib
   src/collatz_kernel.cu
 )
 target_include_directories(collatz_lib PUBLIC include/)
+target_compile_definitions(collatz_lib PUBLIC COLLATZ_N_LIMBS=${COLLATZ_N_LIMBS})
 set_target_properties(collatz_lib PROPERTIES
   CUDA_SEPARABLE_COMPILATION ON
 )
