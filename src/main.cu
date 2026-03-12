@@ -41,6 +41,7 @@ struct Config {
     std::string divergent  = kDefaultDivergent;
     std::string checkpoint = kDefaultCheckpoint;
     bool        resume     = false;
+    bool        fresh      = false;
     bool        help       = false;
 };
 
@@ -100,6 +101,7 @@ static void PrintUsage(const char* Prog) {
         << "  --divergent FILE    File for non-converging chains (default " << kDefaultDivergent << ")\n"
         << "  --checkpoint FILE   Checkpoint file (default " << kDefaultCheckpoint << ")\n"
         << "  --resume            Resume from checkpoint\n"
+        << "  --fresh             Discard existing checkpoint and start fresh\n"
         << "  --help              Show this help\n"
         << "\n"
         << "Integers can exceed 2^64. Uses " << (COLLATZ_N_LIMBS * 64)
@@ -200,6 +202,7 @@ static Config ParseArgs(int Argc, char** Argv) {
         else if (arg("--divergent")) cfg.divergent   = next();
         else if (arg("--checkpoint"))cfg.checkpoint  = next();
         else if (arg("--resume"))    cfg.resume      = true;
+        else if (arg("--fresh"))     cfg.fresh       = true;
         else if (arg("--help"))      cfg.help        = true;
         else {
             std::cerr << "ERROR: unknown option " << Argv[i] << "\n";
@@ -207,6 +210,34 @@ static Config ParseArgs(int Argc, char** Argv) {
         }
     }
     return cfg;
+}
+
+// ── CSV scanning ───────────────────────────────────────────────────
+
+/// Scan existing CSV to find the longest chain length recorded.
+/// Expects header "start_n,chain_length,max_value" and data rows.
+static uint32_t ScanLongestChain(const std::string& Path) {
+    std::ifstream in(Path);
+    if (!in) return 0;
+
+    std::string line;
+    // Skip header
+    if (!std::getline(in, line)) return 0;
+
+    uint32_t longest = 0;
+    while (std::getline(in, line)) {
+        // Find the first comma (after start_n)
+        auto pos1 = line.find(',');
+        if (pos1 == std::string::npos) continue;
+        // Find the second comma (after chain_length)
+        auto pos2 = line.find(',', pos1 + 1);
+        if (pos2 == std::string::npos) continue;
+        // Extract chain_length between the two commas
+        std::string chainStr = line.substr(pos1 + 1, pos2 - pos1 - 1);
+        unsigned long val = std::strtoul(chainStr.c_str(), nullptr, 10);
+        if (val > longest) longest = static_cast<uint32_t>(val);
+    }
+    return longest;
 }
 
 // ── Main loop ──────────────────────────────────────────────────────
@@ -222,6 +253,25 @@ int main(int argc, char** argv) {
     std::signal(SIGINT,  SignalHandler);
     std::signal(SIGTERM, SignalHandler);
 
+    // Safety check: refuse to start if a checkpoint exists but --resume not given
+    if (!cfg.resume) {
+        std::ifstream ckptTest(cfg.checkpoint);
+        if (ckptTest.good()) {
+            ckptTest.close();
+            if (cfg.fresh) {
+                // User explicitly wants to start fresh — remove old checkpoint
+                std::remove(cfg.checkpoint.c_str());
+                std::cerr << "Discarded existing checkpoint (--fresh).\n";
+            } else {
+                std::cerr << "ERROR: checkpoint file '" << cfg.checkpoint
+                          << "' exists from a previous run.\n"
+                          << "  Use --resume  to continue from where you left off\n"
+                          << "  Use --fresh   to discard the checkpoint and start over\n";
+                return 1;
+            }
+        }
+    }
+
     // Resume from checkpoint if requested
     if (cfg.resume) {
         BigUint<> ckptStart;
@@ -232,6 +282,15 @@ int main(int argc, char** argv) {
                       << ckptStart.ToString() << "\n";
         } else {
             std::cerr << "WARNING: no checkpoint found, starting from --start\n";
+        }
+    }
+
+    // Scan existing CSV for longest chain if resuming
+    uint32_t longestChain = 0;
+    if (cfg.resume) {
+        longestChain = ScanLongestChain(cfg.output);
+        if (longestChain > 0) {
+            std::cerr << "Longest chain in existing CSV: " << longestChain << "\n";
         }
     }
 
@@ -357,6 +416,9 @@ int main(int argc, char** argv) {
                         << r.maxValue.ToHexString() << '\n';
                 continue;
             }
+            if (r.chainLength > longestChain) {
+                longestChain = r.chainLength;
+            }
             if (r.chainLength >= cfg.minChain) {
                 csv << r.start.ToHexString() << ','
                     << r.chainLength << ','
@@ -380,6 +442,7 @@ int main(int argc, char** argv) {
             status << "\r" << totalProcessed << " numbers in "
                    << std::fixed << std::setprecision(1) << totalElapsed
                    << "s  " << std::setprecision(0) << rate << " n/s  "
+                   << "longest: " << longestChain << "  "
                    << "current: " << current.ToString();
             // Pad with spaces to clear any previous longer line
             std::string line = status.str();

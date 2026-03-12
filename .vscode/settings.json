@@ -5,6 +5,7 @@
         "./build/collatz_tests": true,
         "./build/collatz": true,
         "./collatz_tests": true,
-        "make": true
+        "make": true,
+        "/home/gazz/collatz/build/collatz_tests": true
     }
 }

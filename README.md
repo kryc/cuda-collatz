@@ -4,10 +4,12 @@ A CUDA-accelerated tool for computing [Collatz (3x+1)](https://en.wikipedia.org/
 
 ## Building
 
-Requires CUDA Toolkit ≥ 12.4, CMake ≥ 3.18, and a C++17 compiler.
+Requires CUDA Toolkit ≥ 12.4, CMake ≥ 3.18, and a C++20 compiler. Use **clang/clang++** as the host compiler — GCC 15 causes linker issues with GTest.
 
 ```bash
-cmake -B build -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CUDA_HOST_COMPILER=clang++
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_COMPILER=clang \
+      -DCMAKE_CXX_COMPILER=clang++
 cmake --build build -j$(nproc)
 ```
 
@@ -23,11 +25,13 @@ cmake --build build -j$(nproc)
 | `--end N` | ∞ | Last number to test (0 = run forever) |
 | `--batch-size N` | 1048576 | Numbers per GPU batch |
 | `--min-chain N` | 1000 | Minimum chain length to log |
-| `--max-steps N` | 0 (off) | Max steps before flagging chain as non-converging |
+| `--max-steps N` | 1000000 | Max steps before flagging chain as non-converging (0 = unlimited) |
 | `--output FILE` | collatz.csv | CSV output file |
 | `--divergent FILE` | collatz_divergent.csv | File for non-converging chains |
 | `--checkpoint FILE` | collatz.ckpt | Checkpoint file |
 | `--resume` | — | Resume from last checkpoint |
+| `--fresh` | — | Discard existing checkpoint and start fresh |
+| `--help` | — | Show usage help |
 
 ### Examples
 
@@ -46,17 +50,28 @@ Resume an interrupted run:
 ./build/collatz --resume
 ```
 
+Discard a previous checkpoint and start over:
+```bash
+./build/collatz --fresh --start 1
+```
+
 Press **Ctrl-C** to stop gracefully — a checkpoint is written so you can `--resume` later.
+
+### Checkpoint safety
+
+If a checkpoint file exists from a previous run, the program will **refuse to start** unless you explicitly pass `--resume` or `--fresh`. This prevents accidentally losing progress.
 
 ## Output
 
-Results are appended to a CSV file:
+Results are appended to a CSV file with values in hexadecimal:
 
 ```
 start_n,chain_length,max_value
-837799,524,2974984576
-871,178,190996
+cc7c7,524,b14e4100
+367,178,2E9F0
 ```
+
+The periodic status line on stderr also shows the current longest chain length found so far.
 
 ### Non-converging chains
 
@@ -64,10 +79,10 @@ When `--max-steps` is set, chains that don't reach 1 within the limit are writte
 
 ```
 start_n,steps_completed,current_value,max_value
-27,50,566,1780
+1b,50,236,6f4
 ```
 
-Columns: starting number, how many steps were completed, value of *n* when the limit was hit, and the peak value seen during the chain.
+Columns: starting number (hex), how many steps were completed, value of *n* when the limit was hit (hex), and the peak value seen during the chain (hex).
 
 ## Big Integers
 
@@ -86,4 +101,4 @@ cmake --build build -j$(nproc)
 ./build/collatz_tests
 ```
 
-77 tests covering big integer arithmetic, Collatz kernel correctness, and max-steps limiting.
+99 tests covering big integer arithmetic (construction, queries, comparison, add, shift, triple-plus-one, toString, toHexString) and Collatz kernel correctness (chain lengths, max values, batching, overflow detection, max-steps limiting).
