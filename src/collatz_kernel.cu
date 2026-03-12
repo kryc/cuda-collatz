@@ -1,10 +1,12 @@
 #include "collatz/collatz_kernel.cuh"
 
+static constexpr int kBlockSize = 256;
+
 template <int N_LIMBS>
-__global__ void CollatzKernel(
+__global__ void __launch_bounds__(kBlockSize) CollatzKernel(
     BigUint<N_LIMBS> Start,
     uint32_t Count,
-    CollatzResult<N_LIMBS>* Results,
+    CollatzResult<N_LIMBS>* __restrict__ Results,
     uint32_t MaxSteps)
 {
     uint32_t idx = blockDim.x * blockIdx.x + threadIdx.x;
@@ -26,11 +28,12 @@ __global__ void CollatzKernel(
             break;
         }
         if (n.IsEven()) {
-            // Even: n = n / 2, one step
-            n.ShiftRight1();
-            res.chainLength += 1;
+            // Even: batch-shift all trailing zeros at once
+            int tz = n.CountTrailingZeros();
+            n.ShiftRightN(tz);
+            res.chainLength += tz;
         } else {
-            // Odd: compute 3n+1, check for overflow, capture max BEFORE shift
+            // Odd: compute 3n+1, check for overflow
             bool ov = n.TriplePlusOne();  // n = 3n + 1
             if (ov) {
                 res.overflow = true;
@@ -40,13 +43,10 @@ __global__ void CollatzKernel(
             if (n > res.maxValue) {
                 res.maxValue = n;
             }
-            // Now divide by 2 (3n+1 is always even), counts as 2 steps
-            n.ShiftRight1();
-            res.chainLength += 2;
-        }
-        // Update max after the step (for even steps, or after the >>1 of odd)
-        if (n > res.maxValue) {
-            res.maxValue = n;
+            // 3n+1 is always even; batch-shift trailing zeros
+            int tz = n.CountTrailingZeros();
+            n.ShiftRightN(tz);
+            res.chainLength += 1 + tz;  // 1 for 3n+1, tz for the divisions
         }
     }
 
@@ -63,9 +63,8 @@ void LaunchCollatzKernel(
     cudaStream_t Stream)
 {
     if (Count == 0) return;
-    const int blockSize = 256;
-    const int gridSize = (Count + blockSize - 1) / blockSize;
-    CollatzKernel<N_LIMBS><<<gridSize, blockSize, 0, Stream>>>(
+    const int gridSize = (Count + kBlockSize - 1) / kBlockSize;
+    CollatzKernel<N_LIMBS><<<gridSize, kBlockSize, 0, Stream>>>(
         Start, Count, DResults, MaxSteps);
 }
 

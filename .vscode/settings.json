@@ -4,6 +4,7 @@
         "nproc": true,
         "./build/collatz_tests": true,
         "./build/collatz": true,
-        "./collatz_tests": true
+        "./collatz_tests": true,
+        "make": true
     }
 }

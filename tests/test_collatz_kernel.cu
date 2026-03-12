@@ -243,7 +243,7 @@ TEST(CollatzKernel, MaxSteps_TooFew_ExceedsLimit) {
     EXPECT_TRUE(r.exceededLimit);
     EXPECT_FALSE(r.overflow);
     EXPECT_GE(r.chainLength, 10u);
-    EXPECT_LE(r.chainLength, 11u);  // odd branch can overshoot by 1
+    EXPECT_LE(r.chainLength, 11u);  // batch-shift can overshoot MaxSteps
     EXPECT_FALSE(r.lastValue.IsOne());  // chain didn't finish
 }
 

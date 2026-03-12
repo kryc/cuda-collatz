@@ -5,16 +5,10 @@
 #include <string>
 #include <algorithm>
 
-#ifdef __CUDA_ARCH__
-#define BU_HOST_DEVICE __host__ __device__
-#else
-#define BU_HOST_DEVICE
-#endif
-
-// Fallback: always mark as host+device when compiled by nvcc
 #ifdef __CUDACC__
-#undef BU_HOST_DEVICE
-#define BU_HOST_DEVICE __host__ __device__
+#define BU_HOST_DEVICE __host__ __device__ __forceinline__
+#else
+#define BU_HOST_DEVICE inline
 #endif
 
 /// Default number of 64-bit limbs. 2 limbs = 128 bits.
@@ -32,12 +26,14 @@ struct BigUint {
 
     /// Default: zero-initialised.
     BU_HOST_DEVICE BigUint() {
+        #pragma unroll
         for (int i = 0; i < N_LIMBS; ++i) limbs[i] = 0;
     }
 
     /// Construct from a single uint64_t value.
     BU_HOST_DEVICE explicit BigUint(uint64_t V) {
         limbs[0] = V;
+        #pragma unroll
         for (int i = 1; i < N_LIMBS; ++i) limbs[i] = 0;
     }
 
@@ -46,6 +42,7 @@ struct BigUint {
     /// True if value == 1.
     BU_HOST_DEVICE bool IsOne() const {
         if (limbs[0] != 1) return false;
+        #pragma unroll
         for (int i = 1; i < N_LIMBS; ++i)
             if (limbs[i] != 0) return false;
         return true;
@@ -53,6 +50,7 @@ struct BigUint {
 
     /// True if value == 0.
     BU_HOST_DEVICE bool IsZero() const {
+        #pragma unroll
         for (int i = 0; i < N_LIMBS; ++i)
             if (limbs[i] != 0) return false;
         return true;
@@ -68,9 +66,25 @@ struct BigUint {
         return (limbs[0] & 1) == 1;
     }
 
+    /// Count the number of trailing zero bits.
+    BU_HOST_DEVICE int CountTrailingZeros() const {
+        #pragma unroll
+        for (int i = 0; i < N_LIMBS; ++i) {
+            if (limbs[i] != 0) {
+#ifdef __CUDA_ARCH__
+                return i * 64 + __ffsll(static_cast<long long>(limbs[i])) - 1;
+#else
+                return i * 64 + __builtin_ctzll(limbs[i]);
+#endif
+            }
+        }
+        return N_LIMBS * 64;
+    }
+
     // ── Comparison ──
 
     BU_HOST_DEVICE bool operator==(const BigUint& O) const {
+        #pragma unroll
         for (int i = 0; i < N_LIMBS; ++i)
             if (limbs[i] != O.limbs[i]) return false;
         return true;
@@ -82,6 +96,7 @@ struct BigUint {
 
     /// True if *this < other.  Compare from most-significant limb down.
     BU_HOST_DEVICE bool operator<(const BigUint& O) const {
+        #pragma unroll
         for (int i = N_LIMBS - 1; i >= 0; --i) {
             if (limbs[i] < O.limbs[i]) return true;
             if (limbs[i] > O.limbs[i]) return false;
@@ -106,6 +121,7 @@ struct BigUint {
     /// Add another BigUint. Returns carry out (0 or 1).
     BU_HOST_DEVICE uint64_t Add(const BigUint& O) {
         uint64_t carry = 0;
+        #pragma unroll
         for (int i = 0; i < N_LIMBS; ++i) {
             uint64_t a = limbs[i];
             uint64_t b = O.limbs[i];
@@ -122,6 +138,7 @@ struct BigUint {
     /// Add a small uint64_t value. Returns carry out (0 or 1).
     BU_HOST_DEVICE uint64_t AddU64(uint64_t V) {
         uint64_t carry = V;
+        #pragma unroll
         for (int i = 0; i < N_LIMBS && carry; ++i) {
             uint64_t sum = limbs[i] + carry;
             carry = (sum < limbs[i]) ? 1ULL : 0ULL;
@@ -132,15 +149,35 @@ struct BigUint {
 
     /// Right-shift by 1 bit (divide by 2).
     BU_HOST_DEVICE void ShiftRight1() {
+        #pragma unroll
         for (int i = 0; i < N_LIMBS - 1; ++i) {
             limbs[i] = (limbs[i] >> 1) | (limbs[i + 1] << 63);
         }
         limbs[N_LIMBS - 1] >>= 1;
     }
 
+    /// Right-shift by N bits (divide by 2^N).
+    BU_HOST_DEVICE void ShiftRightN(int N) {
+        int limbShift = N / 64;
+        int bitShift  = N % 64;
+        #pragma unroll
+        for (int i = 0; i < N_LIMBS; ++i) {
+            int src = i + limbShift;
+            if (src < N_LIMBS) {
+                limbs[i] = limbs[src] >> bitShift;
+                if (bitShift > 0 && src + 1 < N_LIMBS) {
+                    limbs[i] |= limbs[src + 1] << (64 - bitShift);
+                }
+            } else {
+                limbs[i] = 0;
+            }
+        }
+    }
+
     /// Left-shift by 1 bit (multiply by 2). Returns the bit shifted out.
     BU_HOST_DEVICE uint64_t ShiftLeft1() {
         uint64_t carry = 0;
+        #pragma unroll
         for (int i = 0; i < N_LIMBS; ++i) {
             uint64_t newCarry = limbs[i] >> 63;
             limbs[i] = (limbs[i] << 1) | carry;
@@ -152,12 +189,24 @@ struct BigUint {
     /// Compute 3*n + 1 in-place. Returns true if overflow occurred
     /// (result doesn't fit in N_LIMBS limbs).
     BU_HOST_DEVICE bool TriplePlusOne() {
-        // Compute 3n+1 = (n << 1) + n + 1
-        BigUint orig = *this;
-        uint64_t shiftOut = ShiftLeft1();          // *this = n << 1
-        uint64_t addCarry = Add(orig);                // *this = (n << 1) + n = 3n
-        uint64_t plus1Carry = AddU64(1);             // *this = 3n + 1
-        return (shiftOut | addCarry | plus1Carry) != 0;
+        uint64_t carry = 1;  // the +1
+        #pragma unroll
+        for (int i = 0; i < N_LIMBS; ++i) {
+            uint64_t x = limbs[i];
+#ifdef __CUDA_ARCH__
+            uint64_t lo = x * 3ULL;
+            uint64_t hi = __umul64hi(x, 3ULL);
+            uint64_t sum = lo + carry;
+            hi += (sum < lo) ? 1ULL : 0ULL;
+            limbs[i] = sum;
+            carry = hi;
+#else
+            __uint128_t wide = (__uint128_t)x * 3 + carry;
+            limbs[i] = static_cast<uint64_t>(wide);
+            carry = static_cast<uint64_t>(wide >> 64);
+#endif
+        }
+        return carry != 0;
     }
 
     // ── Conversion ──

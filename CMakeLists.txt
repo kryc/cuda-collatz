@@ -1,10 +1,15 @@
 cmake_minimum_required(VERSION 3.18)
 project(collatz LANGUAGES CXX CUDA)
 
+# ── Default to Release for optimised builds ──
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 # ── Standards ──
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # nvcc 12.4 supports up to sm_90. Use PTX (compute_90) for forward

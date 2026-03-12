@@ -98,6 +98,42 @@ TEST(BigUintQueries, IsOdd_Even) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// CountTrailingZeros
+// ═══════════════════════════════════════════════════════════════════
+
+TEST(BigUintQueries, CTZ_One) {
+    EXPECT_EQ(BigUint<2>(1).CountTrailingZeros(), 0);
+}
+
+TEST(BigUintQueries, CTZ_Two) {
+    EXPECT_EQ(BigUint<2>(2).CountTrailingZeros(), 1);
+}
+
+TEST(BigUintQueries, CTZ_PowerOf2) {
+    EXPECT_EQ(BigUint<2>(1ULL << 20).CountTrailingZeros(), 20);
+}
+
+TEST(BigUintQueries, CTZ_OddNumber) {
+    EXPECT_EQ(BigUint<2>(0xFF01).CountTrailingZeros(), 0);
+}
+
+TEST(BigUintQueries, CTZ_HighLimbOnly) {
+    BigUint<2> x(0);
+    x.limbs[1] = 8;  // bit 67 set (64 + 3)
+    EXPECT_EQ(x.CountTrailingZeros(), 67);
+}
+
+TEST(BigUintQueries, CTZ_BothLimbs) {
+    BigUint<2> x(4);  // bit 2 set
+    x.limbs[1] = 1;
+    EXPECT_EQ(x.CountTrailingZeros(), 2);  // lowest set bit wins
+}
+
+TEST(BigUintQueries, CTZ_Zero) {
+    EXPECT_EQ(BigUint<2>(0).CountTrailingZeros(), 128);  // N_LIMBS * 64
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Comparison
 // ═══════════════════════════════════════════════════════════════════
 
@@ -268,6 +304,58 @@ TEST(BigUintShift, LeftShift_Overflow) {
     a.limbs[1] = 0x8000000000000000ULL;
     uint64_t out = a.ShiftLeft1();
     EXPECT_EQ(out, 1u);  // bit shifted out of top limb
+}
+
+// ── ShiftRightN (multi-bit right shift) ──
+
+TEST(BigUintShift, RightShiftN_Zero) {
+    BigUint<2> a(42);
+    a.ShiftRightN(0);
+    EXPECT_EQ(a, BigUint<2>(42));
+}
+
+TEST(BigUintShift, RightShiftN_ByOne) {
+    BigUint<2> a(2);
+    a.ShiftRightN(1);
+    EXPECT_EQ(a, BigUint<2>(1));
+}
+
+TEST(BigUintShift, RightShiftN_ByFour) {
+    BigUint<2> a(0x30);  // 48
+    a.ShiftRightN(4);
+    EXPECT_EQ(a, BigUint<2>(3));
+}
+
+TEST(BigUintShift, RightShiftN_CrossLimb) {
+    BigUint<2> a(0);
+    a.limbs[1] = 1;  // 2^64
+    a.ShiftRightN(1);
+    EXPECT_EQ(a.limbs[0], 0x8000000000000000ULL);
+    EXPECT_EQ(a.limbs[1], 0u);
+}
+
+TEST(BigUintShift, RightShiftN_FullLimb) {
+    BigUint<2> a(0);
+    a.limbs[1] = 0xFF;
+    a.ShiftRightN(64);
+    EXPECT_EQ(a.limbs[0], 0xFFu);
+    EXPECT_EQ(a.limbs[1], 0u);
+}
+
+TEST(BigUintShift, RightShiftN_LimbPlusBits) {
+    BigUint<2> a(0);
+    a.limbs[1] = 0x80;  // bit 71
+    a.ShiftRightN(68);   // shift right by 64+4
+    EXPECT_EQ(a.limbs[0], 8u);  // 0x80 >> 4 = 8
+    EXPECT_EQ(a.limbs[1], 0u);
+}
+
+TEST(BigUintShift, RightShiftN_AllBits) {
+    BigUint<2> a(UINT64_MAX);
+    a.limbs[1] = UINT64_MAX;
+    a.ShiftRightN(128);
+    EXPECT_EQ(a.limbs[0], 0u);
+    EXPECT_EQ(a.limbs[1], 0u);
 }
 
 // ═══════════════════════════════════════════════════════════════════
