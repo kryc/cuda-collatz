@@ -503,3 +503,63 @@ TEST(BigUintToHexString, Max128Bit) {
     a.limbs[1] = UINT64_MAX;
     EXPECT_EQ(a.ToHexString(), "0xffffffffffffffffffffffffffffffff");
 }
+
+// ── ToPowerString ──────────────────────────────────────────────────
+
+TEST(BigUintToPowerString, Zero) {
+    EXPECT_EQ(BigUint<2>(0).ToPowerString(), "0");
+}
+
+TEST(BigUintToPowerString, One) {
+    EXPECT_EQ(BigUint<2>(1).ToPowerString(), "1");
+}
+
+TEST(BigUintToPowerString, Two) {
+    EXPECT_EQ(BigUint<2>(2).ToPowerString(), "2^1");
+}
+
+TEST(BigUintToPowerString, Three) {
+    EXPECT_EQ(BigUint<2>(3).ToPowerString(), "2^1 + 1");
+}
+
+TEST(BigUintToPowerString, PowerOfTwo) {
+    // 1024 = 2^10
+    EXPECT_EQ(BigUint<2>(1024).ToPowerString(), "2^10");
+}
+
+TEST(BigUintToPowerString, PowerOfTwoPlusOffset) {
+    // 1024 + 37 = 1061
+    EXPECT_EQ(BigUint<2>(1061).ToPowerString(), "2^10 + 37");
+}
+
+TEST(BigUintToPowerString, LargeNumber) {
+    // 1048576 = 2^20
+    EXPECT_EQ(BigUint<2>(1048576).ToPowerString(), "2^20");
+}
+
+TEST(BigUintToPowerString, LargeWithOffset) {
+    // 2^20 + 500000
+    EXPECT_EQ(BigUint<2>(1048576 + 500000).ToPowerString(), "2^20 + 500000");
+}
+
+TEST(BigUintToPowerString, PowerOfTwo64) {
+    // 2^64
+    BigUint<2> a(0);
+    a.limbs[1] = 1;
+    EXPECT_EQ(a.ToPowerString(), "2^64");
+}
+
+TEST(BigUintToPowerString, PowerOfTwo64PlusSmall) {
+    // 2^64 + 42
+    BigUint<2> a(42);
+    a.limbs[1] = 1;
+    EXPECT_EQ(a.ToPowerString(), "2^64 + 42");
+}
+
+TEST(BigUintToPowerString, HighBitWithLargeRemainder) {
+    // 2^65 + 2^64 = 3 * 2^64  →  bit 65 set, remainder = 2^64
+    // remainder doesn't fit in u64, so shown as hex
+    BigUint<2> a(0);
+    a.limbs[1] = 3;  // bits 64 and 65 set
+    EXPECT_EQ(a.ToPowerString(), "2^65 + 0x10000000000000000");
+}

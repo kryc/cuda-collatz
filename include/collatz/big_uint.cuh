@@ -274,4 +274,37 @@ struct BigUint {
         }
         return result;
     }
+
+    /// Format as "2^x + y" for human-readable magnitude display (host-only).
+    std::string ToPowerString() const {
+        if (IsZero()) return "0";
+        if (IsOne())  return "1";
+
+        // Find the most-significant non-zero limb.
+        int msLimb = N_LIMBS - 1;
+        while (msLimb > 0 && limbs[msLimb] == 0) --msLimb;
+
+        // Highest set bit position.
+        int highBit = msLimb * 64 + (63 - __builtin_clzll(limbs[msLimb]));
+
+        // Compute remainder = value - 2^highBit (clear the top bit).
+        BigUint remainder = *this;
+        remainder.limbs[msLimb] &= ~(1ULL << (highBit % 64));
+
+        if (remainder.IsZero()) {
+            return "2^" + std::to_string(highBit);
+        }
+
+        // Check if remainder fits in a single limb.
+        bool fitsInU64 = true;
+        for (int i = 1; i < N_LIMBS; ++i) {
+            if (remainder.limbs[i] != 0) { fitsInU64 = false; break; }
+        }
+
+        std::string base = "2^" + std::to_string(highBit) + " + ";
+        if (fitsInU64) {
+            return base + std::to_string(remainder.limbs[0]);
+        }
+        return base + remainder.ToHexString();
+    }
 };

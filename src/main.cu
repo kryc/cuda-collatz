@@ -279,7 +279,7 @@ int main(int argc, char** argv) {
         if (ReadCheckpoint(cfg.checkpoint, ckptStart, ckptBatch)) {
             cfg.start = ckptStart;
             std::cerr << "Resumed from checkpoint: start = "
-                      << ckptStart.ToString() << "\n";
+                      << ckptStart.ToPowerString() << "\n";
         } else {
             std::cerr << "WARNING: no checkpoint found, starting from --start\n";
         }
@@ -443,7 +443,7 @@ int main(int argc, char** argv) {
                    << std::fixed << std::setprecision(1) << totalElapsed
                    << "s  " << std::setprecision(0) << rate << " n/s  "
                    << "longest: " << longestChain << "  "
-                   << "current: " << current.ToString();
+                   << "current: " << current.ToPowerString();
             // Pad with spaces to clear any previous longer line
             std::string line = status.str();
             if (line.size() < 80) line.resize(80, ' ');
@@ -464,7 +464,7 @@ int main(int argc, char** argv) {
         cudaStreamSynchronize(streams[0]);
         cudaStreamSynchronize(streams[1]);
         WriteCheckpoint(cfg.checkpoint, current, batchSize);
-        std::cerr << "Checkpoint written at " << current.ToString() << "\n";
+        std::cerr << "Checkpoint written at " << current.ToPowerString() << "\n";
     }
 
 cleanup:
