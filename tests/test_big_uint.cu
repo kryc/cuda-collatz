@@ -420,6 +420,112 @@ TEST(BigUintTriplePlusOne, OverflowTwoLimbs) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// TriplePlusOneAndShift (fused 3n+1 then strip trailing zeros)
+// ═══════════════════════════════════════════════════════════════════
+
+TEST(BigUintTriplePlusOneAndShift, One) {
+    // 1 → 3*1+1 = 4 = 100b → shift 2 → 1, tz=2
+    BigUint<2> a(1);
+    bool overflow;
+    int tz = a.TriplePlusOneAndShift(overflow);
+    EXPECT_FALSE(overflow);
+    EXPECT_EQ(tz, 2);
+    EXPECT_EQ(a, BigUint<2>(1));
+}
+
+TEST(BigUintTriplePlusOneAndShift, Three) {
+    // 3 → 3*3+1 = 10 = 1010b → shift 1 → 5, tz=1
+    BigUint<2> a(3);
+    bool overflow;
+    int tz = a.TriplePlusOneAndShift(overflow);
+    EXPECT_FALSE(overflow);
+    EXPECT_EQ(tz, 1);
+    EXPECT_EQ(a, BigUint<2>(5));
+}
+
+TEST(BigUintTriplePlusOneAndShift, Five) {
+    // 5 → 3*5+1 = 16 = 10000b → shift 4 → 1, tz=4
+    BigUint<2> a(5);
+    bool overflow;
+    int tz = a.TriplePlusOneAndShift(overflow);
+    EXPECT_FALSE(overflow);
+    EXPECT_EQ(tz, 4);
+    EXPECT_EQ(a, BigUint<2>(1));
+}
+
+TEST(BigUintTriplePlusOneAndShift, TwentySeven) {
+    // 27 → 3*27+1 = 82 = 1010010b → shift 1 → 41, tz=1
+    BigUint<2> a(27);
+    bool overflow;
+    int tz = a.TriplePlusOneAndShift(overflow);
+    EXPECT_FALSE(overflow);
+    EXPECT_EQ(tz, 1);
+    EXPECT_EQ(a, BigUint<2>(41));
+}
+
+TEST(BigUintTriplePlusOneAndShift, Seven) {
+    // 7 → 3*7+1 = 22 = 10110b → shift 1 → 11, tz=1
+    BigUint<2> a(7);
+    bool overflow;
+    int tz = a.TriplePlusOneAndShift(overflow);
+    EXPECT_FALSE(overflow);
+    EXPECT_EQ(tz, 1);
+    EXPECT_EQ(a, BigUint<2>(11));
+}
+
+TEST(BigUintTriplePlusOneAndShift, CrossLimbCarry) {
+    // n = 2^63 - 1 (all bits set in limb 0)
+    // 3n+1 = 3*(2^63-1)+1 = 3*2^63 - 2 = 2^64 + 2^63 - 2
+    // = 0x7FFFFFFFFFFFFFFE in limb 0, 0x1 in limb 1
+    // trailing zeros = 1, result = (3*2^63 - 2)/2 = 3*2^62 - 1
+    BigUint<2> a(UINT64_MAX >> 1);  // 2^63 - 1
+    bool overflow;
+    int tz = a.TriplePlusOneAndShift(overflow);
+    EXPECT_FALSE(overflow);
+    EXPECT_EQ(tz, 1);
+    // Expected: (3*(2^63-1)+1) / 2 = (3*2^63 - 2) / 2 = 3*2^62 - 1
+    uint64_t expected = 3ULL * (1ULL << 62) - 1;
+    EXPECT_EQ(a.limbs[0], expected);
+}
+
+TEST(BigUintTriplePlusOneAndShift, OverflowSingleLimb) {
+    BigUint<1> a(1ULL << 63);
+    bool overflow;
+    a.TriplePlusOneAndShift(overflow);
+    EXPECT_TRUE(overflow);
+}
+
+TEST(BigUintTriplePlusOneAndShift, OverflowTwoLimbs) {
+    BigUint<2> a(0);
+    a.limbs[1] = (1ULL << 63);
+    bool overflow;
+    a.TriplePlusOneAndShift(overflow);
+    EXPECT_TRUE(overflow);
+}
+
+TEST(BigUintTriplePlusOneAndShift, MatchesSeparateOps) {
+    // Verify fused matches separate TriplePlusOne + CTZ + ShiftRightN
+    // for a range of odd values
+    for (uint64_t v = 1; v < 1000; v += 2) {
+        BigUint<2> a(v);
+        BigUint<2> b(v);
+
+        // Separate ops
+        a.TriplePlusOne();
+        int tz_a = a.CountTrailingZeros();
+        a.ShiftRightN(tz_a);
+
+        // Fused
+        bool overflow;
+        int tz_b = b.TriplePlusOneAndShift(overflow);
+
+        EXPECT_FALSE(overflow) << "v=" << v;
+        EXPECT_EQ(tz_a, tz_b) << "v=" << v;
+        EXPECT_EQ(a, b) << "v=" << v;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // ToString
 // ═══════════════════════════════════════════════════════════════════
 

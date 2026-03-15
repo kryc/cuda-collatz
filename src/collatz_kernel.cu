@@ -112,24 +112,28 @@ __global__ void __launch_bounds__(kBlockSize, kMinBlocksPerSM) CompactCollatzKer
     uint32_t steps = 0;
     uint8_t  flags = 0;
 
+    // Strip initial even factors (only possible when !OddOnly)
+    if constexpr (!OddOnly) {
+        if (n.IsEven() && !n.IsZero()) {
+            int tz = n.CountTrailingZeros();
+            n.ShiftRightN(tz);
+            steps += tz;
+        }
+    }
+
+    // n is now odd — fused loop: 3n+1 and shift in one call, no branch
     while (!n.IsOne()) {
         if (MaxSteps > 0 && steps >= MaxSteps) {
             flags |= CompactResult::kExceededLimit;
             break;
         }
-        if (n.IsEven()) {
-            int tz = n.CountTrailingZeros();
-            n.ShiftRightN(tz);
-            steps += tz;
-        } else {
-            if (n.TriplePlusOne()) {
-                flags |= CompactResult::kOverflow;
-                break;
-            }
-            int tz = n.CountTrailingZeros();
-            n.ShiftRightN(tz);
-            steps += 1 + tz;
+        bool overflow;
+        int tz = n.TriplePlusOneAndShift(overflow);
+        if (overflow) {
+            flags |= CompactResult::kOverflow;
+            break;
         }
+        steps += 1 + tz;
     }
 
     CompactResult cr;
@@ -189,24 +193,28 @@ __global__ void __launch_bounds__(kBlockSize, kMinBlocksPerSM) AdaptiveCollatzKe
     uint32_t steps = 0;
     uint8_t  flags = 0;
 
+    // Strip initial even factors (only possible when !OddOnly)
+    if constexpr (!OddOnly) {
+        if (n.IsEven() && !n.IsZero()) {
+            int tz = n.CountTrailingZeros();
+            n.ShiftRightN(tz);
+            steps += tz;
+        }
+    }
+
+    // n is now odd — fused loop: 3n+1 and shift in one call, no branch
     while (!n.IsOne()) {
         if (MaxSteps > 0 && steps >= MaxSteps) {
             flags |= CompactResult::kExceededLimit;
             break;
         }
-        if (n.IsEven()) {
-            int tz = n.CountTrailingZeros();
-            n.ShiftRightN(tz);
-            steps += tz;
-        } else {
-            if (n.TriplePlusOne()) {
-                flags |= CompactResult::kOverflow;
-                break;
-            }
-            int tz = n.CountTrailingZeros();
-            n.ShiftRightN(tz);
-            steps += 1 + tz;
+        bool overflow;
+        int tz = n.TriplePlusOneAndShift(overflow);
+        if (overflow) {
+            flags |= CompactResult::kOverflow;
+            break;
         }
+        steps += 1 + tz;
     }
 
     if (flags != 0 || steps > MinChain) {

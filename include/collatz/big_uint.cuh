@@ -253,6 +253,70 @@ struct BigUint {
         return carry != 0;
     }
 
+    /// Fused 3n+1 then right-shift all trailing zeros.
+    /// Assumes n is odd. After this call the value is odd (or 1).
+    /// Returns the number of trailing zeros shifted out.
+    /// Sets `overflow` to true if 3n+1 exceeds N_LIMBS capacity.
+    BU_HOST_DEVICE int TriplePlusOneAndShift(bool& overflow) {
+        // Step 1: compute 3n+1
+        uint64_t carry = 1;  // the +1
+        #pragma unroll
+        for (int i = 0; i < N_LIMBS; ++i) {
+            uint64_t x = limbs[i];
+#ifdef __CUDA_ARCH__
+            uint64_t lo = x * 3ULL;
+            uint64_t hi = __umul64hi(x, 3ULL);
+            uint64_t sum = lo + carry;
+            hi += (sum < lo) ? 1ULL : 0ULL;
+            limbs[i] = sum;
+            carry = hi;
+#else
+            __uint128_t wide = (__uint128_t)x * 3 + carry;
+            limbs[i] = static_cast<uint64_t>(wide);
+            carry = static_cast<uint64_t>(wide >> 64);
+#endif
+        }
+        if (carry != 0) {
+            overflow = true;
+            return 0;
+        }
+        overflow = false;
+
+        // Step 2: count trailing zeros
+        int tz = 0;
+        #pragma unroll
+        for (int i = 0; i < N_LIMBS; ++i) {
+            if (limbs[i] != 0) {
+#ifdef __CUDA_ARCH__
+                tz = i * 64 + __ffsll(static_cast<long long>(limbs[i])) - 1;
+#else
+                tz = i * 64 + __builtin_ctzll(limbs[i]);
+#endif
+                break;
+            }
+        }
+
+        // Step 3: shift right by tz
+        if (tz > 0) {
+            int limbShift = tz / 64;
+            int bitShift  = tz % 64;
+            #pragma unroll
+            for (int i = 0; i < N_LIMBS; ++i) {
+                int src = i + limbShift;
+                if (src < N_LIMBS) {
+                    limbs[i] = limbs[src] >> bitShift;
+                    if (bitShift > 0 && src + 1 < N_LIMBS) {
+                        limbs[i] |= limbs[src + 1] << (64 - bitShift);
+                    }
+                } else {
+                    limbs[i] = 0;
+                }
+            }
+        }
+
+        return tz;
+    }
+
     // ── Conversion ──
 
     /// Convert to uint64_t. Only valid if value fits; no check performed.
