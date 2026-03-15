@@ -397,6 +397,22 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Check for existing non-converging chains
+    uint64_t existingDivergent = 0;
+    if (cfg.maxSteps > 0) {
+        std::ifstream divCheck(cfg.divergent);
+        if (divCheck.good()) {
+            std::string line;
+            if (std::getline(divCheck, line)) {  // skip header
+                while (std::getline(divCheck, line)) ++existingDivergent;
+            }
+            if (existingDivergent > 0) {
+                std::cerr << "WARNING: " << existingDivergent
+                          << " non-converging chain(s) in " << cfg.divergent << "\n";
+            }
+        }
+    }
+
     // Ensure start is odd when using odd-only mode
     if (cfg.oddOnly && cfg.start.IsEven() && !cfg.start.IsZero()) {
         cfg.start.AddU64(1);
@@ -459,6 +475,7 @@ int main(int argc, char** argv) {
     bool hasEnd = !cfg.endVal.IsZero();
 
     uint64_t totalProcessed = 0;
+    uint64_t totalDivergent = existingDivergent;
     auto wallStart = std::chrono::steady_clock::now();
     auto lastReport = wallStart;
 
@@ -530,6 +547,7 @@ int main(int argc, char** argv) {
                 continue;
             }
             if (r.exceededLimit) {
+                ++totalDivergent;
                 divCsv << r.start.ToHexString() << ','
                         << r.chainLength << ','
                         << r.lastValue.ToHexString() << ','
@@ -562,8 +580,10 @@ int main(int argc, char** argv) {
                    << std::fixed << std::setprecision(1) << totalElapsed
                    << "s  " << std::setprecision(0) << rate << " n/s  "
                    << "longest: " << longestChain << "  "
-                   << "min: " << effectiveMinChain << "  "
-                   << "current: " << current.ToPowerString();
+                   << "min: " << effectiveMinChain << "  ";
+            if (totalDivergent > 0)
+                status << "divergent: " << totalDivergent << "  ";
+            status << "current: " << current.ToPowerString();
             if (cfg.oddOnly) status << " (odd only)";
             std::string line = status.str();
             if (line.size() < 80) line.resize(80, ' ');
