@@ -407,13 +407,6 @@ int main(int argc, char** argv) {
         std::cerr << "Adjusted start to odd number: " << cfg.start.ToPowerString() << "\n";
     }
 
-    // Report min-chain threshold
-    if (cfg.minChain == 0) {
-        std::cerr << "Adaptive min-chain: logging new longest chains only\n";
-    } else {
-        std::cerr << "Min-chain: " << cfg.minChain << "\n";
-    }
-
     // Open CSV for appending
     std::ofstream csv(cfg.output, std::ios::app);
     if (!csv) {
@@ -522,17 +515,17 @@ int main(int argc, char** argv) {
         for (uint32_t i = 0; i < prevCount; ++i) {
             const auto& r = hResults[prevBuf][i];
             if (r.overflow) {
-                std::cerr << "\nOVERFLOW at n=" << r.start.ToHexString()
+                std::cerr << "\nOVERFLOW at n=" << r.start.ToString()
                           << " — increase limbs (currently "
                           << COLLATZ_N_LIMBS * 64 << " bits)\n";
                 continue;
             }
             if (r.exceededLimit) {
                 ++totalDivergent;
-                divCsv << r.start.ToHexString() << ','
+                divCsv << r.start.ToString() << ','
                         << r.chainLength << ','
-                        << r.lastValue.ToHexString() << ','
-                        << r.maxValue.ToHexString() << '\n';
+                        << r.lastValue.ToString() << ','
+                        << r.maxValue.ToString() << '\n';
                 continue;
             }
             bool isNewLongest = r.chainLength > longestChain;
@@ -540,9 +533,9 @@ int main(int argc, char** argv) {
                 longestChain = r.chainLength;
             }
             if (cfg.minChain == 0 ? isNewLongest : r.chainLength >= cfg.minChain) {
-                csv << r.start.ToHexString() << ','
+                csv << r.start.ToString() << ','
                     << r.chainLength << ','
-                    << r.maxValue.ToHexString() << '\n';
+                    << r.maxValue.ToString() << '\n';
             }
         }
         csv.flush();
@@ -557,15 +550,23 @@ int main(int argc, char** argv) {
             double totalElapsed =
                 std::chrono::duration<double>(now - wallStart).count();
             double rate = totalProcessed / totalElapsed;
+            // Format rate with SI suffix (K/M/B)
+            auto FormatRate = [](double r) -> std::string {
+                char buf[32];
+                if (r >= 1e9)      std::snprintf(buf, sizeof(buf), "%.1fB", r / 1e9);
+                else if (r >= 1e6) std::snprintf(buf, sizeof(buf), "%.1fM", r / 1e6);
+                else if (r >= 1e3) std::snprintf(buf, sizeof(buf), "%.1fK", r / 1e3);
+                else               std::snprintf(buf, sizeof(buf), "%.0f", r);
+                return buf;
+            };
             std::ostringstream status;
-            status << "\r" << totalProcessed << " numbers in "
-                   << std::fixed << std::setprecision(1) << totalElapsed
-                   << "s  " << std::setprecision(0) << rate << " n/s  "
-                   << "longest: " << longestChain << "  ";
+            status << "\r"
+                   << "n/s:" << FormatRate(rate)
+                   << (cfg.oddOnly ? " (odd)" : "")
+                   << " longest: " << longestChain;
+            status << " current: " << current.ToProgressString();
             if (totalDivergent > 0)
-                status << "divergent: " << totalDivergent << "  ";
-            status << "current: " << current.ToPowerString();
-            if (cfg.oddOnly) status << " (odd only)";
+                status << " divergent: " << totalDivergent;
             std::string line = status.str();
             if (line.size() < 80) line.resize(80, ' ');
             std::cerr << line << std::flush;

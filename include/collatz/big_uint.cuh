@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <algorithm>
@@ -349,6 +350,52 @@ struct BigUint {
             return base + std::to_string(remainder.limbs[0]);
         }
         return base + remainder.ToHexString();
+    }
+
+    /// Format as "2^x (P%)" showing percentage progress through the current
+    /// power-of-2 range [2^x, 2^(x+1)) (host-only).
+    std::string ToProgressString() const {
+        if (IsZero()) return "0";
+        if (IsOne())  return "1";
+
+        int msLimb = N_LIMBS - 1;
+        while (msLimb > 0 && limbs[msLimb] == 0) --msLimb;
+        int highBit = msLimb * 64 + (63 - __builtin_clzll(limbs[msLimb]));
+
+        // remainder = value - 2^highBit
+        BigUint remainder = *this;
+        remainder.limbs[msLimb] &= ~(1ULL << (highBit % 64));
+
+        if (remainder.IsZero()) {
+            return "2^" + std::to_string(highBit) + " (0%)";
+        }
+
+        // Percentage = remainder / 2^highBit * 100
+        // Shift remainder so top bits give us precision, then divide.
+        // We want ~3 digits of precision, so shift up 10 bits (×1024),
+        // then take the top limb-and-a-bit after aligning.
+        // Simpler: use the top 53 bits of remainder and highBit.
+        double pct;
+        if (highBit <= 53) {
+            // Everything fits in a double
+            double rem = 0;
+            for (int i = msLimb; i >= 0; --i)
+                rem = rem * 18446744073709551616.0 + static_cast<double>(remainder.limbs[i]);
+            double denom = static_cast<double>(1ULL << highBit);
+            pct = rem / denom * 100.0;
+        } else {
+            // Use top bits: shift remainder right by (highBit - 53)
+            BigUint shifted = remainder;
+            int shiftAmt = highBit - 53;
+            shifted.ShiftRightN(shiftAmt);
+            double rem = static_cast<double>(shifted.limbs[0]);
+            double denom = static_cast<double>(1ULL << 53);
+            pct = rem / denom * 100.0;
+        }
+
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.3f%%", pct);
+        return "2^" + std::to_string(highBit) + " (" + buf + ")";
     }
 
     /// Stream insertion operator (host-only, uses ToHexString).
