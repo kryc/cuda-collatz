@@ -40,7 +40,7 @@
 static constexpr uint64_t kDefaultStart           = 1;
 static constexpr uint64_t kDefaultEnd             = 0;        // 0 means "run forever"
 static constexpr uint32_t kDefaultBatchSize       = 1u << 20;  // ~1 million
-static constexpr uint32_t kDefaultMinChainLength   = 1'000;
+static constexpr uint32_t kDefaultMinChainLength   = 1'000;        // 0 means adaptive
 static constexpr uint32_t kDefaultMaxSteps         = 1'000'000;
 static constexpr const char* kDefaultOutput        = "collatz.csv";
 static constexpr const char* kDefaultDivergent     = "collatz_divergent.csv";
@@ -68,6 +68,18 @@ struct Config {
     bool        oddOnly    = true;  // skip even numbers by default
     bool        help       = false;
 };
+
+// ── Adaptive threshold ─────────────────────────────────────────────
+// Heuristic: expected Collatz chain length ≈ (2/ln(4/3)) * ln(n)
+//          = 6.952 * ln(n) = 6.952 * ln(2) * log2(n) ≈ 4.816 * log2(n)
+// BitLength ≈ floor(log2(n)) + 1, so we use (BitLength - 1) as log2(n).
+static constexpr double kChainPerBit = 4.816;  // 2 * ln(2) / ln(4/3)
+
+static uint32_t ExpectedChainLength(const BigUint<>& N) {
+    int bits = N.BitLength();
+    if (bits <= 1) return 1;
+    return static_cast<uint32_t>(kChainPerBit * (bits - 1));
+}
 
 // ── Device query ───────────────────────────────────────────────────
 static void PrintDeviceInfo() {
@@ -144,7 +156,7 @@ static void PrintUsage(const char* Prog) {
         << "                      Accepts decimal, 0x hex, or 2^N notation\n"
         << "  --end N             Last number to test (0 = infinite)\n"
         << "  --batch-size N      Numbers per GPU batch (default " << kDefaultBatchSize << ")\n"
-        << "  --min-chain N       Minimum chain length to log (default " << kDefaultMinChainLength << ")\n"
+        << "  --min-chain N       Minimum chain length to log (0 = adaptive, default)\n"
         << "  --max-steps N       Max steps before flagging as non-converging (default " << kDefaultMaxSteps << ")\n"
         << "  --output FILE       CSV output file (default " << kDefaultOutput << ")\n"
         << "  --divergent FILE    File for non-converging chains (default " << kDefaultDivergent << ")\n"
@@ -391,6 +403,14 @@ int main(int argc, char** argv) {
         std::cerr << "Adjusted start to odd number: " << cfg.start.ToPowerString() << "\n";
     }
 
+    // Report min-chain threshold
+    if (cfg.minChain == 0) {
+        std::cerr << "Adaptive min-chain: ~" << ExpectedChainLength(cfg.start) * 5
+                  << " (5x expected, grows with starting number)\n";
+    } else {
+        std::cerr << "Min-chain: " << cfg.minChain << "\n";
+    }
+
     // Open CSV for appending
     std::ofstream csv(cfg.output, std::ios::app);
     if (!csv) {
@@ -495,6 +515,12 @@ int main(int argc, char** argv) {
                         cudaMemcpyDeviceToHost, streams[prevBuf]));
         CUDA_CHECK(cudaStreamSynchronize(streams[prevBuf]));
 
+        // Compute effective min-chain threshold for this batch
+        uint32_t effectiveMinChain = cfg.minChain;
+        if (cfg.minChain == 0) {
+            effectiveMinChain = ExpectedChainLength(prevStart) * 5;
+        }
+
         for (uint32_t i = 0; i < prevCount; ++i) {
             const auto& r = hResults[prevBuf][i];
             if (r.overflow) {
@@ -513,7 +539,7 @@ int main(int argc, char** argv) {
             if (r.chainLength > longestChain) {
                 longestChain = r.chainLength;
             }
-            if (r.chainLength >= cfg.minChain) {
+            if (r.chainLength >= effectiveMinChain) {
                 csv << r.start.ToHexString() << ','
                     << r.chainLength << ','
                     << r.maxValue.ToHexString() << '\n';
@@ -536,6 +562,7 @@ int main(int argc, char** argv) {
                    << std::fixed << std::setprecision(1) << totalElapsed
                    << "s  " << std::setprecision(0) << rate << " n/s  "
                    << "longest: " << longestChain << "  "
+                   << "min: " << effectiveMinChain << "  "
                    << "current: " << current.ToPowerString();
             if (cfg.oddOnly) status << " (odd only)";
             std::string line = status.str();

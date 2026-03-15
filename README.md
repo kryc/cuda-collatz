@@ -38,7 +38,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release \
 | `--start N` | 1 | First number to test (decimal, hex `0x…`, or `2^N`) |
 | `--end N` | ∞ | Last number to test (0 = run forever) |
 | `--batch-size N` | 1048576 | Numbers per GPU batch |
-| `--min-chain N` | 1000 | Minimum chain length to log |
+| `--min-chain N` | adaptive | Minimum chain length to log (0 = adaptive based on starting number) |
 | `--max-steps N` | 1000000 | Max steps before flagging chain as non-converging (0 = unlimited) |
 | `--no-odd-only` | — | Test all numbers instead of only odd numbers |
 | `--output FILE` | collatz.csv | CSV output file |
@@ -49,6 +49,10 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release \
 | `--help` | — | Show usage help |
 
 By default, only odd numbers are tested — every even number trivially halves down to an odd number with a shorter chain, so skipping them doubles throughput with no loss of interesting results. Pass `--no-odd-only` if you need to test every number.
+
+### Adaptive min-chain
+
+When `--min-chain` is 0 (the default), the threshold adapts to the starting number using the heuristic expected chain length ≈ 4.816 × log₂(n). This means only chains longer than average for that magnitude are logged. The threshold updates automatically as the search progresses. Use `--min-chain N` with a specific value to override.
 
 ### Examples
 

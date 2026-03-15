@@ -84,3 +84,6 @@ void LaunchCollatzKernel(
 template void LaunchCollatzKernel<1>(const BigUint<1>&, uint32_t, CollatzResult<1>*, uint32_t, cudaStream_t, bool);
 template void LaunchCollatzKernel<2>(const BigUint<2>&, uint32_t, CollatzResult<2>*, uint32_t, cudaStream_t, bool);
 template void LaunchCollatzKernel<4>(const BigUint<4>&, uint32_t, CollatzResult<4>*, uint32_t, cudaStream_t, bool);
+
+// Always instantiate for the configured limb count (may duplicate one of the above — that's fine)
+template void LaunchCollatzKernel<COLLATZ_N_LIMBS>(const BigUint<COLLATZ_N_LIMBS>&, uint32_t, CollatzResult<COLLATZ_N_LIMBS>*, uint32_t, cudaStream_t, bool);

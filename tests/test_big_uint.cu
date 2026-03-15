@@ -822,3 +822,43 @@ TEST(BigUint4, Comparison) {
     b.limbs[2] = UINT64_MAX;
     EXPECT_GT(a, b);
 }
+
+// ── BitLength ──
+
+TEST(BitLength, Zero) {
+    BigUint<> n;
+    EXPECT_EQ(n.BitLength(), 0);
+}
+
+TEST(BitLength, One) {
+    BigUint<> n(1);
+    EXPECT_EQ(n.BitLength(), 1);
+}
+
+TEST(BitLength, PowerOf2) {
+    BigUint<> n(1ULL << 20);
+    EXPECT_EQ(n.BitLength(), 21);
+}
+
+TEST(BitLength, MaxU64) {
+    BigUint<> n(UINT64_MAX);
+    EXPECT_EQ(n.BitLength(), 64);
+}
+
+TEST(BitLength, Bit64) {
+    BigUint<> n;
+    n.SetBit(64);
+    EXPECT_EQ(n.BitLength(), 65);
+}
+
+TEST(BitLength, Bit127) {
+    BigUint<> n;
+    n.SetBit(127);
+    EXPECT_EQ(n.BitLength(), 128);
+}
+
+TEST(BitLength, BigUint4_Bit200) {
+    BigUint<4> n;
+    n.SetBit(200);
+    EXPECT_EQ(n.BitLength(), 201);
+}

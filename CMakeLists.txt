@@ -33,8 +33,8 @@ FetchContent_MakeAvailable(googletest)
 
 enable_testing()
 
-# ── Big integer limb count (default 2 = 128-bit) ──
-set(COLLATZ_N_LIMBS "2" CACHE STRING "Number of 64-bit limbs for BigUint (2=128-bit, 4=256-bit, etc.)")
+# ── Big integer limb count (default 3 = 192-bit) ──
+set(COLLATZ_N_LIMBS "3" CACHE STRING "Number of 64-bit limbs for BigUint (2=128-bit, 4=256-bit, etc.)")
 
 # ── Production library ──
 add_library(collatz_lib

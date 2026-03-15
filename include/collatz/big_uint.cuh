@@ -67,6 +67,21 @@ struct BigUint {
         return (limbs[0] & 1) == 1;
     }
 
+    /// Number of bits needed to represent this value (floor(log2(n)) + 1).
+    /// Returns 0 when the value is zero.
+    BU_HOST_DEVICE int BitLength() const {
+        for (int i = N_LIMBS - 1; i >= 0; --i) {
+            if (limbs[i] != 0) {
+#ifdef __CUDA_ARCH__
+                return i * 64 + 64 - __clzll(static_cast<long long>(limbs[i]));
+#else
+                return i * 64 + 64 - __builtin_clzll(limbs[i]);
+#endif
+            }
+        }
+        return 0;
+    }
+
     /// Count the number of trailing zero bits.
     BU_HOST_DEVICE int CountTrailingZeros() const {
         #pragma unroll
