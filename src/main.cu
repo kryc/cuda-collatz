@@ -327,6 +327,43 @@ static uint32_t ScanLongestChain(const std::string& Path) {
 
 // ── Main loop ──────────────────────────────────────────────────────
 
+/// Recompute a full Collatz chain on the CPU for a single starting number.
+/// Used to recover maxValue/lastValue for the rare chains worth logging.
+template <int N_LIMBS = COLLATZ_N_LIMBS>
+static CollatzResult<N_LIMBS> RecomputeChain(const BigUint<N_LIMBS>& StartN,
+                                              uint32_t MaxSteps) {
+    CollatzResult<N_LIMBS> res;
+    res.start = StartN;
+    BigUint<N_LIMBS> n = StartN;
+    res.maxValue = n;
+    res.chainLength = 0;
+    res.overflow = false;
+    res.exceededLimit = false;
+
+    while (!n.IsOne()) {
+        if (MaxSteps > 0 && res.chainLength >= MaxSteps) {
+            res.exceededLimit = true;
+            break;
+        }
+        if (n.IsEven()) {
+            int tz = n.CountTrailingZeros();
+            n.ShiftRightN(tz);
+            res.chainLength += tz;
+        } else {
+            if (n.TriplePlusOne()) {
+                res.overflow = true;
+                break;
+            }
+            if (n > res.maxValue) res.maxValue = n;
+            int tz = n.CountTrailingZeros();
+            n.ShiftRightN(tz);
+            res.chainLength += 1 + tz;
+        }
+    }
+    res.lastValue = n;
+    return res;
+}
+
 int main(int argc, char** argv) {
     Config cfg = ParseArgs(argc, argv);
     if (cfg.help) {
@@ -434,22 +471,40 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ── Double-buffered GPU pipeline ──
-    // Two CUDA streams so compute on batch N+1 overlaps with D→H copy of batch N.
+    // ── GPU pipeline ──
     const uint32_t batchSize = cfg.batchSize;
-    const size_t resultBytes = batchSize * sizeof(CollatzResult<>);
+    const bool adaptive = (cfg.minChain == 0);
 
     cudaStream_t streams[2];
     CUDA_CHECK(cudaStreamCreate(&streams[0]));
     CUDA_CHECK(cudaStreamCreate(&streams[1]));
 
-    CollatzResult<>* dResults[2];
-    CUDA_CHECK(cudaMalloc(&dResults[0], resultBytes));
-    CUDA_CHECK(cudaMalloc(&dResults[1], resultBytes));
+    // ── Adaptive mode buffers (GPU-filtered, minimal D→H) ──
+    static constexpr uint32_t kMaxHitsPerBatch = 4096;
 
-    CollatzResult<>* hResults[2];
-    CUDA_CHECK(cudaMallocHost(&hResults[0], resultBytes));  // pinned for async copy
-    CUDA_CHECK(cudaMallocHost(&hResults[1], resultBytes));
+    uint32_t*    dHitCount[2] = {};
+    AdaptiveHit* dHits[2]     = {};
+    uint32_t     hHitCount[2] = {};
+    AdaptiveHit* hHits[2]     = {};
+
+    // ── Compact mode buffers (also used as bootstrap for adaptive when longestChain == 0) ──
+    const size_t compactBytes = batchSize * sizeof(CompactResult);
+    CompactResult* dResults[2] = {};
+    CompactResult* hResults[2] = {};
+
+    // Always allocate compact buffers (they're small: ~8 bytes × batchSize)
+    for (int b = 0; b < 2; ++b) {
+        CUDA_CHECK(cudaMalloc(&dResults[b], compactBytes));
+        CUDA_CHECK(cudaMallocHost(&hResults[b], compactBytes));
+    }
+
+    if (adaptive) {
+        for (int b = 0; b < 2; ++b) {
+            CUDA_CHECK(cudaMalloc(&dHitCount[b], sizeof(uint32_t)));
+            CUDA_CHECK(cudaMalloc(&dHits[b], kMaxHitsPerBatch * sizeof(AdaptiveHit)));
+            CUDA_CHECK(cudaMallocHost(&hHits[b], kMaxHitsPerBatch * sizeof(AdaptiveHit)));
+        }
+    }
 
     BigUint<> current = cfg.start;
     bool hasEnd = !cfg.endVal.IsZero();
@@ -480,7 +535,26 @@ int main(int argc, char** argv) {
         return batchSize;
     };
 
+    // Helper: launch kernel for the given buffer slot
+    // In adaptive mode, fall back to compact kernel when longestChain == 0
+    // (first batch has no threshold so adaptive would emit everything).
+    auto UseAdaptive = [&]() { return adaptive && longestChain > 0; };
+
+    auto LaunchBatch = [&](const BigUint<>& Start, uint32_t Count, int Buf) {
+        if (UseAdaptive()) {
+            CUDA_CHECK(cudaMemsetAsync(dHitCount[Buf], 0, sizeof(uint32_t), streams[Buf]));
+            LaunchAdaptiveCollatzKernel<>(Start, Count, dHitCount[Buf], dHits[Buf],
+                                         longestChain, kMaxHitsPerBatch,
+                                         cfg.maxSteps, streams[Buf], cfg.oddOnly);
+        } else {
+            LaunchCompactCollatzKernel<>(Start, Count, dResults[Buf],
+                                        cfg.maxSteps, streams[Buf], cfg.oddOnly);
+        }
+        CUDA_CHECK_LAST();
+    };
+
     int buf = 0;
+    bool bufUsedAdaptive[2] = {false, false};
 
     // Launch first batch
     uint32_t count = ComputeBatchCount(current);
@@ -488,8 +562,8 @@ int main(int argc, char** argv) {
         std::cerr << "Nothing to compute (start > end).\n";
         goto cleanup;
     }
-    LaunchCollatzKernel<>(current, count, dResults[buf], cfg.maxSteps, streams[buf], cfg.oddOnly);
-    CUDA_CHECK_LAST();
+    bufUsedAdaptive[buf] = UseAdaptive();
+    LaunchBatch(current, count, buf);
 
     while (!gShutdownRequested.load(std::memory_order_relaxed)) {
         BigUint<> prevStart = current;
@@ -503,39 +577,94 @@ int main(int argc, char** argv) {
         bool moreWork = (count > 0);
 
         if (moreWork) {
-            LaunchCollatzKernel<>(current, count, dResults[buf], cfg.maxSteps, streams[buf], cfg.oddOnly);
-            CUDA_CHECK_LAST();
+            bufUsedAdaptive[buf] = UseAdaptive();
+            LaunchBatch(current, count, buf);
         }
 
-        CUDA_CHECK(cudaMemcpyAsync(hResults[prevBuf], dResults[prevBuf],
-                        prevCount * sizeof(CollatzResult<>),
-                        cudaMemcpyDeviceToHost, streams[prevBuf]));
-        CUDA_CHECK(cudaStreamSynchronize(streams[prevBuf]));
+        if (bufUsedAdaptive[prevBuf]) {
+            // Transfer only the hit count (4 bytes)
+            CUDA_CHECK(cudaMemcpyAsync(&hHitCount[prevBuf], dHitCount[prevBuf],
+                            sizeof(uint32_t), cudaMemcpyDeviceToHost, streams[prevBuf]));
+            CUDA_CHECK(cudaStreamSynchronize(streams[prevBuf]));
 
-        for (uint32_t i = 0; i < prevCount; ++i) {
-            const auto& r = hResults[prevBuf][i];
-            if (r.overflow) {
-                std::cerr << "\nOVERFLOW at n=" << r.start.ToString()
-                          << " — increase limbs (currently "
-                          << COLLATZ_N_LIMBS * 64 << " bits)\n";
-                continue;
+            uint32_t nHits = hHitCount[prevBuf];
+            if (nHits > kMaxHitsPerBatch) nHits = kMaxHitsPerBatch;
+
+            if (nHits > 0) {
+                CUDA_CHECK(cudaMemcpy(hHits[prevBuf], dHits[prevBuf],
+                                nHits * sizeof(AdaptiveHit), cudaMemcpyDeviceToHost));
+
+                for (uint32_t h = 0; h < nHits; ++h) {
+                    const auto& hit = hHits[prevBuf][h];
+                    BigUint<> startN = prevStart;
+                    startN.AddU64(static_cast<uint64_t>(hit.index) * stride);
+
+                    if (hit.flags & CompactResult::kOverflow) {
+                        std::cerr << "\nOVERFLOW at n=" << startN.ToString()
+                                  << " — increase limbs (currently "
+                                  << COLLATZ_N_LIMBS * 64 << " bits)\n";
+                        continue;
+                    }
+                    if (hit.flags & CompactResult::kExceededLimit) {
+                        ++totalDivergent;
+                        auto full = RecomputeChain(startN, cfg.maxSteps);
+                        divCsv << full.start.ToString() << ','
+                               << full.chainLength << ','
+                               << full.lastValue.ToString() << ','
+                               << full.maxValue.ToString() << '\n';
+                        continue;
+                    }
+                    if (hit.chainLength > longestChain) {
+                        longestChain = hit.chainLength;
+                    }
+                    auto full = RecomputeChain(startN, cfg.maxSteps);
+                    csv << full.start.ToString() << ','
+                        << full.chainLength << ','
+                        << full.maxValue.ToString() << '\n';
+                }
             }
-            if (r.exceededLimit) {
-                ++totalDivergent;
-                divCsv << r.start.ToString() << ','
-                        << r.chainLength << ','
-                        << r.lastValue.ToString() << ','
-                        << r.maxValue.ToString() << '\n';
-                continue;
-            }
-            bool isNewLongest = r.chainLength > longestChain;
-            if (isNewLongest) {
-                longestChain = r.chainLength;
-            }
-            if (cfg.minChain == 0 ? isNewLongest : r.chainLength >= cfg.minChain) {
-                csv << r.start.ToString() << ','
-                    << r.chainLength << ','
-                    << r.maxValue.ToString() << '\n';
+        } else {
+            // Compact mode: transfer and scan all results
+            CUDA_CHECK(cudaMemcpyAsync(hResults[prevBuf], dResults[prevBuf],
+                            prevCount * sizeof(CompactResult),
+                            cudaMemcpyDeviceToHost, streams[prevBuf]));
+            CUDA_CHECK(cudaStreamSynchronize(streams[prevBuf]));
+
+            for (uint32_t i = 0; i < prevCount; ++i) {
+                const auto& cr = hResults[prevBuf][i];
+                if (cr.flags & CompactResult::kOverflow) {
+                    BigUint<> startN = prevStart;
+                    startN.AddU64(static_cast<uint64_t>(i) * stride);
+                    std::cerr << "\nOVERFLOW at n=" << startN.ToString()
+                              << " — increase limbs (currently "
+                              << COLLATZ_N_LIMBS * 64 << " bits)\n";
+                    continue;
+                }
+                if (cr.flags & CompactResult::kExceededLimit) {
+                    ++totalDivergent;
+                    BigUint<> startN = prevStart;
+                    startN.AddU64(static_cast<uint64_t>(i) * stride);
+                    auto full = RecomputeChain(startN, cfg.maxSteps);
+                    divCsv << full.start.ToString() << ','
+                           << full.chainLength << ','
+                           << full.lastValue.ToString() << ','
+                           << full.maxValue.ToString() << '\n';
+                    continue;
+                }
+                bool isNewLongest = cr.chainLength > longestChain;
+                if (isNewLongest) {
+                    longestChain = cr.chainLength;
+                }
+                // In adaptive mode (compact bootstrap), only log new longest.
+                // In fixed threshold mode, log everything >= minChain.
+                if (adaptive ? isNewLongest : cr.chainLength >= cfg.minChain) {
+                    BigUint<> startN = prevStart;
+                    startN.AddU64(static_cast<uint64_t>(i) * stride);
+                    auto full = RecomputeChain(startN, cfg.maxSteps);
+                    csv << full.start.ToString() << ','
+                        << full.chainLength << ','
+                        << full.maxValue.ToString() << '\n';
+                }
             }
         }
         csv.flush();
@@ -590,10 +719,17 @@ int main(int argc, char** argv) {
 cleanup:
     csv.close();
     if (divCsv.is_open()) divCsv.close();
-    CUDA_CHECK(cudaFreeHost(hResults[0]));
-    CUDA_CHECK(cudaFreeHost(hResults[1]));
-    CUDA_CHECK(cudaFree(dResults[0]));
-    CUDA_CHECK(cudaFree(dResults[1]));
+    for (int b = 0; b < 2; ++b) {
+        if (hResults[b]) CUDA_CHECK(cudaFreeHost(hResults[b]));
+        if (dResults[b]) CUDA_CHECK(cudaFree(dResults[b]));
+    }
+    if (adaptive) {
+        for (int b = 0; b < 2; ++b) {
+            if (hHits[b])     CUDA_CHECK(cudaFreeHost(hHits[b]));
+            if (dHitCount[b]) CUDA_CHECK(cudaFree(dHitCount[b]));
+            if (dHits[b])     CUDA_CHECK(cudaFree(dHits[b]));
+        }
+    }
     CUDA_CHECK(cudaStreamDestroy(streams[0]));
     CUDA_CHECK(cudaStreamDestroy(streams[1]));
 

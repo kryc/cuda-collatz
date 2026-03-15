@@ -29,3 +29,49 @@ void LaunchCollatzKernel(
     uint32_t MaxSteps = 0,
     cudaStream_t Stream = 0,
     bool OddOnly = false);
+
+/// Compact result for the fast kernel path — only chain length + status flags.
+/// At 8 bytes vs ~80 bytes per full result, this reduces D→H bandwidth ~10×
+/// and eliminates the per-step maxValue comparison from the hot loop.
+struct CompactResult {
+    uint32_t chainLength;
+    uint8_t  flags;  // bitmask: kOverflow | kExceededLimit
+
+    static constexpr uint8_t kOverflow      = 1;
+    static constexpr uint8_t kExceededLimit  = 2;
+};
+
+/// Launch the compact Collatz kernel — outputs only chain length + flags.
+template <int N_LIMBS = COLLATZ_N_LIMBS>
+void LaunchCompactCollatzKernel(
+    const BigUint<N_LIMBS>& Start,
+    uint32_t Count,
+    CompactResult* DResults,
+    uint32_t MaxSteps = 0,
+    cudaStream_t Stream = 0,
+    bool OddOnly = false);
+
+/// A single hit from the adaptive kernel — only written for noteworthy chains.
+struct AdaptiveHit {
+    uint32_t index;        ///< Thread index within the batch
+    uint32_t chainLength;
+    uint8_t  flags;        ///< CompactResult::kOverflow | kExceededLimit
+};
+
+/// Launch the adaptive Collatz kernel — filters on GPU, outputs only hits.
+/// Only results with chainLength > MinChain or non-zero flags are written.
+/// @param DHitCount   Device pointer to a uint32_t counter (zeroed via cudaMemsetAsync before launch).
+/// @param DHits       Device array for output hits.
+/// @param MinChain    Only chains strictly longer than this are emitted.
+/// @param MaxHits     Maximum entries to write (prevents buffer overflow).
+template <int N_LIMBS = COLLATZ_N_LIMBS>
+void LaunchAdaptiveCollatzKernel(
+    const BigUint<N_LIMBS>& Start,
+    uint32_t Count,
+    uint32_t* DHitCount,
+    AdaptiveHit* DHits,
+    uint32_t MinChain,
+    uint32_t MaxHits,
+    uint32_t MaxSteps = 0,
+    cudaStream_t Stream = 0,
+    bool OddOnly = false);
